@@ -1,0 +1,52 @@
+[meta]
+name = "heurema"
+repo = "forkwright/heurema"
+generated = false
+source_docs = [
+  "kanon/projects/kanon/planning/discussion-queue.md",
+  "kanon/projects/heurema/STATE.md",
+  "kanon/projects/heurema/vision.md",
+]
+
+[decisions]
+summary = "Accepted decisions for heurema. Canonical planning lives in kanon at projects/heurema/ and projects/kanon/planning/discussion-queue.md; this file reflects the load-bearing decisions for agents who land in this repo cold."
+
+[[decision]]
+id = "kanon-D-067"
+title = "Tier B EXTRACT-NOW verdict for heurema and epitelesis"
+status = "accepted"
+context = "Operator's 2026-05-28 cross-fleet-need test: heurema has named non-aletheia consumers (pinax, mneme) and the architectural case for one HNSW + one BM25 across the fleet only holds if the primitive is shared, not duplicated."
+decision = "Extract heurema to forkwright/heurema and epitelesis to forkwright/epitelesis. Kanon consumes both as external git deps after extraction."
+consequences = "kanon/crates/heurema is removed in the same wave; planning system at kanon/projects/heurema/ stays in kanon as the canonical source of truth."
+
+[[decision]]
+id = "heurema-phase-1-locked"
+title = "Phase 1 API shape locked"
+status = "accepted"
+context = "Phase 2 extraction of HNSW + BM25 from aletheia/krites is blocked on krites cleanup but the trait shape can land now so consumers compile against it today."
+decision = "heurema exposes VectorIndex, FtsIndex, PersistenceBackend, and RRF as the public substrate. HNSW and FTS concrete types are typed stubs; RRF is implemented now because it has no krites dependency."
+consequences = "Stubs return HeuremaError::NotYetImplemented with a Phase 2 marker so callers see a structured failure rather than a panic during the gap."
+
+[[decision]]
+id = "heurema-ground-up-rust"
+title = "Ground-up Rust, zero C deps"
+status = "accepted"
+context = "Heurema meets kanon RUST.md standards from day one; the workspace forbids unsafe code."
+decision = "Phase 2 HNSW extraction must preserve canary-node protection from the krites implementation in safe Rust."
+consequences = "No C dependencies, no unsafe blocks; HNSW correctness invariants travel with the extracted code."
+
+[[decision]]
+id = "heurema-persistence-pluggable"
+title = "Persistence-pluggable backend trait"
+status = "accepted"
+context = "Consumers want different storage substrates (fjall, in-memory, engine-owned)."
+decision = "PersistenceBackend stays a trait; Phase 3 ships sibling adapter crates (heurema-fjall, heurema-memory) under this workspace."
+consequences = "Index implementations stay storage-agnostic; consumers pick adapters independently."
+
+[[decision]]
+id = "heurema-fleet-repo-conventions"
+title = "Conform to FLEET-REPO-SETUP.md"
+status = "accepted"
+context = "heurema joins the Tier U public fleet repos and inherits the same release-please, gate-attestation, and root-file conventions as aletheia, kanon, theatron."
+decision = "Ship release-please + gate-attestation workflows, AGPL-3.0-or-later license, standards inherited from kanon/crates/basanos/standards/, and the _llm corpus on first commit."
+consequences = "Public-mirror readiness from day one; downstream consumers can pin a git tag and rely on the gate-attestation trailer."

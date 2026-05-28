@@ -1,0 +1,19 @@
+# heurema
+
+> Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. One implementation, one proof, orthogonal to query engines.
+
+## Architecture
+
+Structured LLM corpus:
+
+- [_llm/architecture.toml](_llm/architecture.toml): crate roles and layer relationships
+- [_llm/current_state.toml](_llm/current_state.toml): current phase and active threads
+- [_llm/decisions.toml](_llm/decisions.toml): accepted decisions
+
+## Agent entry points
+
+- [README.md](README.md): purpose, status, API surface
+- [CLAUDE.md](CLAUDE.md): repo conventions for AI coding agents
+- [AGENTS.md](AGENTS.md): onboarding + dispatch conventions
+- [crates/heurema/src/lib.rs](crates/heurema/src/lib.rs): public API root
+- [kanon/projects/heurema/](https://github.com/forkwright/kanon/tree/main/projects/heurema): canonical planning (STATE / ROADMAP / vision / design)
