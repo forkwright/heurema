@@ -1,0 +1,71 @@
+[meta]
+name = "heurema"
+repo = "forkwright/heurema"
+generated = false
+source_docs = [
+  "README.md",
+  "CLAUDE.md",
+  "kanon/projects/heurema/STATE.md",
+  "kanon/projects/heurema/ROADMAP.md",
+  "kanon/projects/heurema/vision.md",
+  "kanon/projects/heurema/design.md",
+  "Cargo.toml",
+]
+
+[architecture]
+summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. Single crate today; sibling adapter crates (heurema-fjall, heurema-memory) planned under the same workspace."
+layers = [
+  "public-api",
+  "errors",
+  "vector-index",
+  "fts-index",
+  "persistence",
+  "rank-fusion",
+]
+
+[[architecture.crates]]
+name = "heurema"
+path = "crates/heurema"
+role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), Phase 1 typed stubs for HNSW + BM25, real reciprocal-rank-fusion implementation, and the workspace error chain."
+
+[[interfaces]]
+crate = "heurema"
+kind = "trait"
+name = "VectorIndex"
+purpose = "Insert / query / remove / cardinality for ID-keyed vectors. Used by HNSW implementations."
+
+[[interfaces]]
+crate = "heurema"
+kind = "trait"
+name = "FtsIndex"
+purpose = "Insert / query / remove / cardinality for ID-keyed documents. Used by BM25 implementations."
+
+[[interfaces]]
+crate = "heurema"
+kind = "trait"
+name = "PersistenceBackend"
+purpose = "Save / load named vector and FTS indexes; backend-agnostic so consumers can choose fjall, in-memory, or engine-owned storage."
+
+[[interfaces]]
+crate = "heurema"
+kind = "function"
+name = "rrf"
+purpose = "Reciprocal-rank fusion with caller-supplied k constant."
+
+[[interfaces]]
+crate = "heurema"
+kind = "function"
+name = "rrf_with_default"
+purpose = "Reciprocal-rank fusion with the paper-standard k = 60."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "HeuremaError"
+purpose = "Concrete error surface for vector, FTS, fusion, and persistence operations. snafu-derived with Location capture on every variant."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "PersistenceSource"
+purpose = "Type-erased adapter for backend-specific persistence errors, kept walkable through std::error::Error::source."

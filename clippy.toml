@@ -1,0 +1,14 @@
+# Workspace-wide clippy configuration for heurēma.
+
+too-many-arguments-threshold = 8
+
+# WHY: brand names and acronyms that appear unquoted in rustdoc.
+doc-valid-idents = [
+    "HNSW",
+    "BM25",
+    "RRF",
+]
+
+[[disallowed-methods]]
+path = "std::process::exit"
+reason = "library crate — exit() bypasses destructors and consumer error handling"

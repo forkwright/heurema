@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/heurema",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "AGPL-3.0-or-later"
+homepage = "https://github.com/forkwright/heurema"
+repository = "https://github.com/forkwright/heurema"
+authors = ["forkwright"]
+
+[workspace.dependencies]
+heurema = { version = "0.1.0", path = "crates/heurema" }
+
+# WHY: snafu is the fleet-wide error library per kanon RUST.md. Pinned at the
+# workspace root so the single heurema crate inherits via `workspace = true`,
+# matching the inheritance pattern adapter sub-crates will use later.
+snafu = "0.8"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# WHY: library code denies these — tests are the only place they may appear,
+# and tests are scoped to dev-dependencies. Mirrors kanon workspace lints.
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+# WHY: pedantic overrides — fleet baseline. These are noise in this crate.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+must_use_unit = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
