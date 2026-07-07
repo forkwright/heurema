@@ -70,6 +70,9 @@ pub trait FtsIndex {
 
     /// WHY: Remove gives consumers the same lifecycle hook as vector indexes
     /// when a source row or fact disappears.
+    ///
+    /// Removal is idempotent: removing an `id` that is not in the index is a
+    /// successful no-op, so row-deletion cleanup can retry safely.
     fn remove(&mut self, id: &Self::Id) -> Result<(), HeuremaError>;
 
     /// WHY: Consumers need document cardinality for scoring and maintenance

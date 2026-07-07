@@ -31,8 +31,11 @@ impl fmt::Display for PersistenceSource {
 }
 
 impl std::error::Error for PersistenceSource {
+    /// WHY: `Display` already forwards the wrapped error's message, so the
+    /// chain continues at the wrapped error's own source — returning the
+    /// wrapped error here would repeat the same message as a dead hop.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
+        self.source.source()
     }
 }
 
@@ -50,6 +53,17 @@ pub enum HeuremaError {
         expected: usize,
         /// Actual vector dimension.
         actual: usize,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: Rank fusion must reject a malformed dampening constant with a
+    /// typed error instead of panicking inside library code.
+    #[snafu(display("invalid RRF k_constant: {k_constant} (must be finite and positive)"))]
+    InvalidKConstant {
+        /// Rejected rank dampening constant.
+        k_constant: f32,
         /// Error creation location.
         #[snafu(implicit)]
         location: snafu::Location,

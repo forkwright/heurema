@@ -61,14 +61,29 @@ pub trait VectorIndex {
 
     /// WHY: Insert mirrors krites `hnsw_put`: a consumer supplies an owned ID
     /// plus the vector bytes to index.
+    ///
+    /// # Errors
+    ///
+    /// Implementations must return [`HeuremaError::DimensionMismatch`] when
+    /// `vector.len()` differs from the dimensionality the index was
+    /// configured with, before mutating any index state.
     fn insert(&mut self, id: Self::Id, vector: &[f32]) -> Result<(), HeuremaError>;
 
     /// WHY: Query mirrors krites `hnsw_knn`: consumers ask for top-k IDs and
     /// distances without receiving engine-owned tuples.
+    ///
+    /// # Errors
+    ///
+    /// Implementations must return [`HeuremaError::DimensionMismatch`] when
+    /// `vector.len()` differs from the dimensionality the index was
+    /// configured with.
     fn query(&self, vector: &[f32], k: usize) -> Result<Vec<(Self::Id, f32)>, HeuremaError>;
 
     /// WHY: Remove mirrors krites `hnsw_remove`: deleting a base row must also
     /// delete the corresponding vector graph entry.
+    ///
+    /// Removal is idempotent: removing an `id` that is not in the index is a
+    /// successful no-op, so row-deletion cleanup can retry safely.
     fn remove(&mut self, id: &Self::Id) -> Result<(), HeuremaError>;
 
     /// WHY: Consumers need index cardinality for adaptive exact-vs-HNSW search.
