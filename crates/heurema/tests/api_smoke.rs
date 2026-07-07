@@ -1,4 +1,45 @@
-use heurema::{Bm25Index, FtsConfig, FtsIndex, HeuremaError, HnswConfig, HnswIndex, VectorIndex};
+use heurema::{
+    Bm25Index, FtsConfig, FtsIndex, HeuremaError, HnswConfig, HnswIndex, VectorDistance,
+    VectorIndex,
+};
+
+#[test]
+fn hnsw_config_new_pins_krites_parity_defaults() {
+    let config = HnswConfig::new(768);
+
+    assert_eq!(config.dimensions, 768, "dimensions must pass through");
+    assert_eq!(
+        config.distance,
+        VectorDistance::L2,
+        "krites default distance is L2"
+    );
+    assert_eq!(
+        config.ef_construction, 50,
+        "krites default construction beam width is 50"
+    );
+    assert_eq!(
+        config.m_neighbours, 16,
+        "krites default HNSW m parameter is 16"
+    );
+}
+
+#[test]
+fn fts_config_simple_pins_krites_default_tokenizer() {
+    let config = FtsConfig::simple();
+
+    assert_eq!(
+        config.tokenizer.name, "Simple",
+        "krites default tokenizer is Simple"
+    );
+    assert!(
+        config.tokenizer.args.is_empty(),
+        "the Simple tokenizer takes no arguments"
+    );
+    assert!(
+        config.filters.is_empty(),
+        "the simple pipeline applies no post-tokenization filters"
+    );
+}
 
 #[test]
 fn hnsw_stub_exposes_vector_index_contract() {
