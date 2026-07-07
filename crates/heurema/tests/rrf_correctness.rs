@@ -70,7 +70,7 @@ fn tied_scores_order_by_ascending_id_regardless_of_arrangement() {
     assert_eq!(
         ids,
         vec!["alpha", "delta"],
-        "exact-score ties must order by ascending ID"
+        "exact-score ties must sort ascending by ID"
     );
 
     let swapped = rrf_with_default(&[bm25_only, vector_only]);
