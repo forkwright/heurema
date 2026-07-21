@@ -1,3 +1,34 @@
+# WHY(kanon#2522): replaces heurema's trailer-only passthrough (previously
+# `uses: forkwright/.github/.github/workflows/gate-attestation.yml@5be130bf...`
+# -- pure trailer verify, no full-build fallback, no ai-attribution, no
+# doc-only exemption; same pinned sha as koinon's prior file) with the
+# kanon-owned hybrid gate.
+#
+# WHY ai_attribution_check/docs_only_exemption are NOT set below
+# (UNVERIFIED-strip, kanon#2522 A4 follow-up): forkwright/kanon main
+# (hybrid-gate.yml) does not yet declare these workflow_call inputs as of
+# this adoption -- passing them would make GH Actions reject the unknown
+# `with:` keys at trigger time. Re-add both once that kanon-side extension
+# is actually on kanon's main.
+#
+# WARNING(UNVERIFIED, but low risk): heurema has NO ci.yml / test / build
+# workflow -- only gate-attestation.yml, release-please.yml, and
+# security.yml (cargo-deny + cargo-audit; no compile/test step, no
+# osv-scanner unlike theatron). So `full-gate-build` below will be the
+# first-ever compile of this workspace in CI. Risk is low relative to
+# theatron: heurema is a single-crate workspace
+# (`[package.metadata.kanon] maturity = "alpha", phase = "1"`, description
+# "scaffold + API + RRF; HNSW/FTS stubbed pending krites extraction") whose
+# only dependency is snafu -- no C-binding crates, no GUI/OS-integration
+# surface. Still, watch full-gate-build actually pass on the adoption PR
+# before trusting these fleet defaults are correct for this repo.
+#
+# NOTE: rust-toolchain.toml pins `channel = "stable"` -- auto-detect
+# applies, no rust_toolchain override. No `git =
+# "https://github.com/forkwright/..."` dependency in the root or
+# crates/heurema Cargo.toml (grepped directly) -- needs_fleet_repo_token
+# stays false. No ci.yml means no double-build-cost concern here (nothing
+# else compiles this workspace unconditionally today).
 name: Gate Attestation
 
 on:
@@ -7,10 +38,27 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# WHY no concurrency: block here: hybrid-gate.yml itself already declares
+# `concurrency: group: ${{ github.workflow }}-${{ github.ref }}` and its own
+# comment states callers must NOT also set a concurrency group with that
+# same key, or the shared group self-cancels. heurema's PRIOR file set this
+# exact key -- dropped here, not carried forward, for that reason.
 
 jobs:
   gate:
-    uses: forkwright/.github/.github/workflows/gate-attestation.yml@5be130bfebd5165d3221f1896f96b5ce6e93bf9b
+    uses: forkwright/kanon/.github/workflows/hybrid-gate.yml@main
+    with:
+      fmt_cmd: "cargo fmt --all -- --check"
+      check_cmd: "cargo check --workspace --all-targets"
+      clippy_cmd: "cargo clippy --workspace --all-targets -- -D warnings"
+      nextest_cmd: "cargo nextest run --workspace"
+      # UNVERIFIED: no ci.yml exists to confirm whether heurema intends
+      # doctest coverage. Left at skip (fleet default) rather than invented.
+      doctest_cmd: ""
+      # WHY empty: heurema's only dependency (workspace-wide) is snafu --
+      # pure Rust, no system packages plausible. Verified against
+      # crates/heurema/Cargo.toml directly.
+      system_packages: ""
+      needs_fleet_repo_token: false
+      rust_cache_key: "gate-attestation"
+    secrets: inherit
