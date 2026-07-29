@@ -28,6 +28,11 @@
                     "type": "toml",
                     "path": "Cargo.toml",
                     "jsonpath": "$.workspace.dependencies.heurema.version"
+                },
+                {
+                    "type": "toml",
+                    "path": "Cargo.lock",
+                    "jsonpath": "$.package[?(!@.source)].version"
                 }
             ]
         }
