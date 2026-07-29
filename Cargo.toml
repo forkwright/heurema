@@ -5,7 +5,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.94"
 license = "AGPL-3.0-or-later"
@@ -14,7 +14,7 @@ repository = "https://github.com/forkwright/heurema"
 authors = ["forkwright"]
 
 [workspace.dependencies]
-heurema = { version = "0.1.1", path = "crates/heurema" }
+heurema = { version = "0.1.2", path = "crates/heurema" }
 
 # WHY: snafu is the fleet-wide error library per kanon RUST.md. Pinned at the
 # workspace root so the single heurema crate inherits via `workspace = true`,
