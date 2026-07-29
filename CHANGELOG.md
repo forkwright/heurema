@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/forkwright/heurema/compare/v0.1.1...v0.1.2) (2026-07-29)
+
+
+### Bug Fixes
+
+* **release:** keep Cargo.lock in lockstep with the workspace version ([#10](https://github.com/forkwright/heurema/issues/10)) ([22fc2cf](https://github.com/forkwright/heurema/commit/22fc2cfb43107d88769fd094e39b2cf726b5cdf8)), closes [#7](https://github.com/forkwright/heurema/issues/7)
+
 ## [0.1.1](https://github.com/forkwright/heurema/compare/v0.1.0...v0.1.1) (2026-07-08)
 
 
