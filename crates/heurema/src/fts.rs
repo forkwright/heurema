@@ -58,7 +58,11 @@ impl FtsConfig {
 /// query, removal, and size inspection independent of relation storage.
 pub trait FtsIndex {
     /// Identifier stored alongside each indexed document.
-    type Id: Eq + Hash + Clone;
+    ///
+    /// WHY: `Ord` is the bound [`crate::rrf`] fuses under. Requiring it here
+    /// keeps the advertised hybrid path — query an index, fuse the result —
+    /// compilable for a generic consumer that knows only this trait.
+    type Id: Ord + Hash + Clone;
 
     /// WHY: Insert mirrors krites `put_fts_index_item`: consumers supply a
     /// document body and an engine-owned ID.
@@ -66,6 +70,33 @@ pub trait FtsIndex {
 
     /// WHY: Query mirrors krites `fts_search`: consumers ask for ranked IDs and
     /// BM25-style scores without receiving engine-owned tuples.
+    ///
+    /// Ranking contract — implementations must satisfy all of it, because
+    /// [`crate::rrf`] reads *position* as the authoritative rank and ignores
+    /// the returned score entirely:
+    ///
+    /// - **Ordering is normative.** Element 0 is the best match, and each
+    ///   subsequent element is no better than its predecessor. A result vector
+    ///   in any other order still type-checks but silently changes what
+    ///   fusion computes.
+    /// - **Score polarity is descending-is-better** — these are BM25-style
+    ///   relevance scores, so a larger `f32` is a better match, and the
+    ///   sequence is non-increasing. Note this is the opposite polarity to
+    ///   [`crate::VectorIndex::query`], which returns distances; fusion is
+    ///   immune to the difference precisely because it reads position rather
+    ///   than score. The score is advisory: it is carried for display and
+    ///   thresholding, never used to re-derive rank.
+    /// - **IDs are unique** within one result vector.
+    /// - **Ties are stable.** Equal scores must be ordered by ascending `Id`,
+    ///   so repeating a query over unchanged index state returns an identical
+    ///   vector.
+    /// - **At most `k`** elements are returned; fewer is valid when the index
+    ///   holds fewer matching documents.
+    ///
+    /// # Errors
+    ///
+    /// Implementations return [`HeuremaError`] when the backing engine cannot
+    /// service the query.
     fn query(&self, query: &str, k: usize) -> Result<Vec<(Self::Id, f32)>, HeuremaError>;
 
     /// WHY: Remove gives consumers the same lifecycle hook as vector indexes

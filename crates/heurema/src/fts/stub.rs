@@ -47,7 +47,7 @@ impl<Id> Bm25Index<Id> {
 
 impl<Id> FtsIndex for Bm25Index<Id>
 where
-    Id: Eq + Hash + Clone,
+    Id: Ord + Hash + Clone,
 {
     type Id = Id;
 
