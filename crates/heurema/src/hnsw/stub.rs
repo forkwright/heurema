@@ -47,7 +47,7 @@ impl<Id> HnswIndex<Id> {
 
 impl<Id> VectorIndex for HnswIndex<Id>
 where
-    Id: Eq + Hash + Clone,
+    Id: Ord + Hash + Clone,
 {
     type Id = Id;
 
