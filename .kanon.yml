@@ -1,0 +1,15 @@
+# WHY(YAML/missing-concurrency on gate-attestation.yml): the rule detects a push/pull_request
+# workflow with no `concurrency:` block and prescribes adding one. That prescription is wrong
+# for this file: gate-attestation.yml is a thin caller that delegates to
+# `forkwright/.github/.github/workflows/hybrid-gate.yml`, and the callee already declares
+# `concurrency: group: ${{ github.workflow }}-${{ github.ref }}` and documents that callers
+# must NOT also set a group with that key, or the shared group self-cancels. The rule's own
+# rationale — stacked runs wasting compute — is therefore already satisfied by the callee.
+# The check has no `uses:` resolution, so it cannot see the delegation and fires on every
+# hybrid-gate caller.
+# NOTE: heurema's gate-attestation.yml already carries a comment recording that it dropped a
+# concurrency block it previously set, for exactly this reason. The rule fires against a
+# deliberate, documented decision.
+# WARNING: this is the ONLY lint violation on heurema's main, and `kanon gate` requires ZERO
+# under strict_warnings, so without this entry no heurema branch can be stamped locally.
+suppress: [{rule: YAML/missing-concurrency, files: [.github/workflows/gate-attestation.yml]}]
