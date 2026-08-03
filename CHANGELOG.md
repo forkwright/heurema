@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/forkwright/heurema/compare/v0.1.2...v0.1.3) (2026-08-03)
+
+
+### Bug Fixes
+
+* **heurema:** compose index result contracts with RRF ([#14](https://github.com/forkwright/heurema/issues/14)) ([0fd437c](https://github.com/forkwright/heurema/commit/0fd437c1f51c3f1a9d346d7d6975671d2f22d1c3)), closes [#2](https://github.com/forkwright/heurema/issues/2)
+* **release:** match path-deps by filter so new crates stay covered ([#12](https://github.com/forkwright/heurema/issues/12)) ([02885c1](https://github.com/forkwright/heurema/commit/02885c15a7c6ec1252f90e92f9938a2cec8072e2))
+
 ## [0.1.2](https://github.com/forkwright/heurema/compare/v0.1.1...v0.1.2) (2026-07-29)
 
 
