@@ -54,4 +54,15 @@ Heurēma is not a vector database, query language, embedding-model host, or dist
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE).
+MPL-2.0. See [LICENSE](LICENSE).
+
+The choice is load-bearing, because heurēma has to be consumable from both sides of the fleet at once.
+`aletheia` is AGPL-3.0-or-later, and MPL §1.12 makes that a Secondary License, so §3.3 lets it consume
+heurēma directly. `kanon`, `logismos` and `daimon` are PolyForm Shield, which cannot grant AGPL's §5(c)
+and §13 terms — under an AGPL heurēma they could not have been consumers at all. MPL's file-level
+copyleft reaches those repos without that conflict.
+
+Two consequences worth stating so they are not undone by a later tidy-up. Exhibit B is deliberately not
+attached to any file here; attaching it would make heurēma Incompatible With Secondary Licenses and cut
+off aletheia. And `deny.toml` does not allow AGPL dependencies, since taking one would propagate terms
+the Shield consumers cannot accept.
