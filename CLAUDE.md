@@ -47,15 +47,17 @@ cargo test --workspace
 
 - **Errors:** `snafu` with `.context()` propagation, `Location` on every variant, `PersistenceSource` type-erases only at the backend boundary.
 - **Traits:** `VectorIndex`, `FtsIndex`, `PersistenceBackend` carry the cross-engine contracts. Default methods exist only where the override would be uniform across implementors (e.g., `is_empty`).
-- **Stubs:** Phase 1 ships typed stubs for HNSW and BM25 that return `HeuremaError::NotYetImplemented { feature: "Phase 2: …" }`. Stubs preserve trait bounds so consumers compile and exercise the API shape before the krites extraction lands.
+- **Stubs:** Phase 1 ships typed stubs for HNSW and BM25 that return `HeuremaError::NotYetImplemented { feature: "Phase 2: …" }`. Stubs preserve trait bounds so consumers compile and exercise the API shape before the real engines land.
 - **No suppressions without `reason`:** `#[expect(lint, reason = "…")]` not `#[allow]`. The `reason` documents the invariant, not the lint name.
-- **No `unsafe`:** workspace `unsafe_code = "forbid"`. HNSW algorithms borrow from peer-reviewed implementations; this crate stays safe Rust end-to-end.
+- **No `unsafe`:** workspace `unsafe_code = "forbid"`. HNSW follows the published algorithm; the implementation is written here, and this crate stays safe Rust end-to-end.
 
 ## Roadmap
 
 - **Phase 1 (current):** API + RRF + stubs. Locked.
-- **Phase 2:** extract HNSW and BM25 from aletheia's `krites` crate. Driven by aletheia Phase 05g.
+- **Phase 2:** write HNSW and BM25 here, fresh. They are **not** extracted from aletheia's `krites` — that code is vendored CozoDB under MPL-2.0 (see `aletheia/crates/krites/NOTICE.md`), so moving it would relocate a provenance question rather than resolve one. `krites` serves as the behavioural reference and its tests as a conformance oracle, which is also the opportunity to fix what the vendored implementation got wrong.
 - **Phase 3:** persistence adapters (`heurema-fjall`, `heurema-memory`) ship as sibling crates under this workspace.
+
+The long-run goal is retirement, not coexistence: heurēma exists so the derived engines in `krites` can be deleted. A phase that ships a second implementation beside the vendored one, without retiring it, has doubled the maintenance surface and resolved nothing.
 
 Planning lives in kanon at `projects/heurema/` — STATE.md, ROADMAP.md, vision.md, design.md. Update there, not here.
 
