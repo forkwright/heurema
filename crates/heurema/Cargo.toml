@@ -20,10 +20,10 @@ workspace = true
 
 # WHY: maturity flag is read by the kanon substrate registry so consumers can
 # tell at a glance which API surfaces are still pre-stabilization. Phase 1
-# lands the API + RRF; HNSW + FTS bodies extract from krites in Phase 2.
+# lands the API + RRF; HNSW + FTS bodies are written fresh in Phase 2.
 [package.metadata.kanon]
 maturity = "alpha"
 since = "2026-05-25"
 phase = "1"
-phase-description = "scaffold + API + RRF; HNSW/FTS stubbed pending krites extraction"
-exit-criteria = "Phase 2 HNSW + BM25 extraction from aletheia/krites; tracked at kanon/projects/heurema/ROADMAP.md"
+phase-description = "scaffold + API + RRF; HNSW/FTS stubbed pending a fresh implementation"
+exit-criteria = "Phase 2 HNSW + BM25 written fresh, with aletheia/krites as a behavioural reference and its tests as a conformance oracle; tracked at kanon/projects/heurema/ROADMAP.md"

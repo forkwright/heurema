@@ -2,7 +2,7 @@
 
 *εὕρημα - a finding, a discovery. Root of "eureka." Search indices are the means by which a system finds what it didn't know it was holding.*
 
-A reservation for the fleet's shared vector (HNSW), full-text (BM25), and rank-fusion search primitives — one working piece today (RRF), with the rest committed as a trait surface pending extraction from aletheia's `krites` crate.
+A reservation for the fleet's shared vector (HNSW), full-text (BM25), and rank-fusion search primitives — one working piece today (RRF), with the rest committed as a trait surface pending a fresh implementation.
 
 ## What's real
 
@@ -21,12 +21,14 @@ incremented — there is no index behind either type yet. `PersistenceBackend` (
 a trait with no implementation in this crate at all.
 
 This is deliberate, not drift: the trait surface *is* the design. Committing the API now lets `pinax`
-and `mneme` build against the shape before the engines exist. The intended path to Phase 2 is
-extracting the canonical HNSW and BM25 implementations out of aletheia's `krites` crate into these stub
-slots, not writing new ones from scratch — see `crates/heurema/Cargo.toml`'s
-`package.metadata.kanon.exit-criteria`.
+and `mneme` build against the shape before the engines exist.
 
-Nothing here should be read as "heurēma provides HNSW/BM25 search" until that extraction lands.
+The engines will be **written fresh**, not extracted. aletheia's `krites` carries working HNSW and BM25,
+but that code is vendored CozoDB under MPL-2.0, so moving it would relocate a provenance question rather
+than resolve one. `krites` instead serves as a behavioural reference and its tests as a conformance
+oracle, which is also the opportunity to fix what the vendored implementation got wrong.
+
+Nothing here should be read as "heurēma provides HNSW/BM25 search" until those implementations land.
 
 ## API surface
 
