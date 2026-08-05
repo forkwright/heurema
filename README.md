@@ -50,7 +50,9 @@ The API is deliberately engine-agnostic. Heurēma knows nothing about SQL, Datal
 
 ## Non-goals
 
-Heurēma is not a vector database, query language, embedding-model host, or distributed search layer. Embedding models live in `logismos`; SQL routing lives in `pinax`; Datalog routing lives in `mneme`. Heurēma is the substrate those systems depend on.
+Heurēma is not a vector database, embedding-model host, or distributed search layer. Embedding models live in `logismos`; SQL routing lives in `pinax`.
+
+Datalog is the exception, and it is deliberate: heurēma owns the Datalog engine as `akolouthia`. Splitting the engine from the indexes it queries would put a cross-repo seam on the hottest path in the fleet, so the engine and the index contracts live in one workspace behind one facade, adapted per consumer by configuration. The `mneme` repo is the memory *policy* layer — factor sets, admission, lifecycle rules — sitting over heurēma, not a second engine.
 
 ## License
 
