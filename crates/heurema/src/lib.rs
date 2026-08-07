@@ -3,9 +3,13 @@
 //! Shared vector, full-text, persistence, and rank-fusion search primitives for
 //! the forkwright fleet.
 //!
-//! Heurēma is intentionally query-engine agnostic. Pinax, mneme, and future
-//! consumers own SQL, Datalog, or other language surfaces; this crate owns the
-//! index contracts those engines wrap.
+//! This crate owns the index contracts that query engines wrap, and stays
+//! agnostic of any consumer-specific language surface — pinax owns SQL.
+//!
+//! Datalog is not a separate repo's concern: heurēma owns that engine as
+//! `akolouthia`, in this workspace, because separating an engine from the
+//! indexes it queries puts a cross-repo seam on the hottest path. `mneme` is
+//! the memory policy layer above heurēma, not a second engine.
 
 #![deny(missing_docs)]
 
