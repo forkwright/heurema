@@ -7,7 +7,7 @@ use crate::HeuremaError;
 use crate::error::{DimensionMismatchSnafu, NotYetImplementedSnafu};
 use crate::hnsw::{HnswConfig, VectorIndex};
 
-const HNSW_PHASE_2_FEATURE: &str = "Phase 2: extract HNSW from krites";
+const HNSW_PHASE_2_FEATURE: &str = "Phase 2: HNSW not yet implemented";
 
 /// WHY: Phase 1 needs a concrete HNSW type so downstream trait bounds compile
 /// before the krites graph implementation is extracted.

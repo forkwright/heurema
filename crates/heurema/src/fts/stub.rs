@@ -7,7 +7,7 @@ use crate::HeuremaError;
 use crate::error::NotYetImplementedSnafu;
 use crate::fts::{FtsConfig, FtsIndex};
 
-const FTS_PHASE_2_FEATURE: &str = "Phase 2: extract BM25 FTS from krites";
+const FTS_PHASE_2_FEATURE: &str = "Phase 2: BM25 FTS not yet implemented";
 
 /// WHY: Phase 1 needs a concrete BM25 type so downstream trait bounds compile
 /// before the krites FTS implementation is extracted.
