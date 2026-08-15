@@ -54,7 +54,7 @@ cargo test --workspace
 ## Roadmap
 
 - **Phase 1 (current):** API + RRF + stubs. Locked.
-- **Phase 2:** write HNSW and BM25 here, fresh. They are **not** extracted from aletheia's `krites` — that code is vendored CozoDB under MPL-2.0 (see `aletheia/crates/krites/NOTICE.md`), so moving it would relocate a provenance question rather than resolve one. `krites` serves as the behavioural reference and its tests as a conformance oracle, which is also the opportunity to fix what the vendored implementation got wrong.
+- **Phase 2:** the source is gated on aletheia's krites clean-room rewrite (`aletheia#5954`, phase 05b) landing and then clearing its standalone-extraction gate (`aletheia#6060` / ADR-007, itself gated on phase 05g). Until that gate clears, `krites` is vendored CozoDB under MPL-2.0 (see `aletheia/crates/krites/NOTICE.md`) — moving it here would relocate a provenance question rather than resolve one, so HNSW and BM25 are written fresh here, with `krites` serving only as behavioural reference and its tests as a conformance oracle. Once the gate clears, the rewritten `krites` is standards-compliant and MPL-free and extraction becomes the live option. This entry tracks which side of the gate Phase 2 is on; other repo docs point here rather than restate it.
 - **Phase 3:** persistence adapters (`heurema-fjall`, `heurema-memory`) ship as sibling crates under this workspace.
 
 The long-run goal is retirement, not coexistence: heurēma exists so the derived engines in `krites` can be deleted. A phase that ships a second implementation beside the vendored one, without retiring it, has doubled the maintenance surface and resolved nothing.
