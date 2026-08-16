@@ -34,9 +34,9 @@ This is deliberate, not drift: the trait surface *is* the design. Committing the
 and `mneme` build against the shape before the engines exist.
 
 The engines will be **written fresh**, not extracted. aletheia's `krites` carries working HNSW and BM25,
-but that code is vendored CozoDB under MPL-2.0, so moving it would relocate a provenance question rather
-than resolve one. `krites` instead serves as a behavioural reference and its tests as a conformance
-oracle, which is also the opportunity to fix what the vendored implementation got wrong.
+but that code is vendored CozoDB under MPL-2.0, so moving it would relocate a provenance question, not
+resolve one. `krites` instead is a behavioural reference, and its tests are a conformance oracle: the
+same opportunity to fix what the vendored implementation got wrong.
 
 Nothing here should be read as "heurēma provides HNSW/BM25 search" until those implementations land.
 
