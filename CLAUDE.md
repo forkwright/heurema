@@ -1,5 +1,5 @@
 <!--
-scope: heurema repo conventions (single-crate fleet substrate, Phase 1)
+scope: heurema repo conventions (fleet substrate: the heurema trait crate plus its persistence-adapter sibling crates)
 defers_to: ~/.claude/CLAUDE.md for operator principles; ~/dev/kanon/crates/basanos/standards/STANDARDS.md for fleet-wide standards
 tightens: per-crate CLAUDE.md under crates/heurema/ may narrow conventions
 -->
@@ -24,16 +24,23 @@ Particularly relevant:
 ## Layout
 
 ```
-Cargo.toml             # workspace root
-crates/heurema/        # single crate, workspace member
-  src/                 # lib.rs, error.rs, fts.rs (+ fts/stub.rs),
-                       # hnsw.rs (+ hnsw/stub.rs), persistence.rs, rrf.rs
-  tests/               # api_smoke.rs, rrf_correctness.rs
-_llm/                  # structured LLM corpus
-.github/workflows/     # release-please.yml, gate-attestation.yml
+Cargo.toml           # workspace root
+crates/heurema/      # trait + RRF crate, workspace member
+  src/               # lib.rs, error.rs, fts.rs (+ fts/stub.rs),
+                     # hnsw.rs (+ hnsw/stub.rs), persistence.rs, rrf.rs
+  tests/             # api_smoke.rs, index_rrf_composition.rs,
+                     # persistence_contract.rs, rrf_correctness.rs
+crates/atmis/        # in-memory PersistenceBackend adapter (ἀτμίς, vapor)
+  src/lib.rs         # AtmisBackend
+  tests/             # persistence_memory.rs
+crates/thesauros/    # fjall-backed PersistenceBackend adapter (θησαυρός, storehouse)
+  src/lib.rs         # ThesaurosBackend
+  tests/             # persistence_fjall.rs
+_llm/                # structured LLM corpus
+.github/workflows/   # release-please.yml, gate-attestation.yml, ci.yml, security.yml
 ```
 
-The workspace shape is intentional even at one crate: future adapter sub-crates (`heurema-fjall`, `heurema-memory`) plug in without restructure.
+The workspace shape was chosen for exactly this: the two adapter sub-crates plug in as siblings with no restructure of `crates/heurema/`.
 
 ## Commands
 
@@ -48,14 +55,15 @@ cargo test --workspace
 - **Errors:** `snafu` with `.context()` propagation, `Location` on every variant, `PersistenceSource` type-erases only at the backend boundary.
 - **Traits:** `VectorIndex`, `FtsIndex`, `PersistenceBackend` carry the cross-engine contracts. Default methods exist only where the override would be uniform across implementors (e.g., `is_empty`).
 - **Stubs:** Phase 1 ships typed stubs for HNSW and BM25 that return `HeuremaError::NotYetImplemented { feature: "Phase 2: …" }`. Stubs preserve trait bounds so consumers compile and exercise the API shape before the real engines land.
+- **Persistence adapters:** `AtmisBackend` and `ThesaurosBackend` both encode through `serde_json`, never by cloning the live `I` — that byte-level round trip is what proves the encode/decode path a durable backend depends on. `PersistenceBackend`'s save methods bound `I: Serialize`, its load methods bound `I: DeserializeOwned` (`persistence.rs`); a caller-chosen index type needs both derives to satisfy an adapter.
 - **No suppressions without `reason`:** `#[expect(lint, reason = "…")]` not `#[allow]`. The `reason` documents the invariant, not the lint name.
 - **No `unsafe`:** workspace `unsafe_code = "forbid"`. HNSW follows the published algorithm; the implementation is written here, and this crate stays safe Rust end-to-end.
 
 ## Roadmap
 
-- **Phase 1 (current):** API + RRF + stubs. Locked.
-- **Phase 2:** the source is gated on aletheia's krites clean-room rewrite (`aletheia#5954`, phase 05b) landing and then clearing its standalone-extraction gate (`aletheia#6060` / ADR-007, itself gated on phase 05g). Until that gate clears, `krites` is vendored CozoDB under MPL-2.0 (see `aletheia/crates/krites/NOTICE.md`) — moving it here would relocate a provenance question rather than resolve one, so HNSW and BM25 are written fresh here, with `krites` serving only as behavioural reference and its tests as a conformance oracle. Once the gate clears, the rewritten `krites` is standards-compliant and MPL-free and extraction becomes the live option. This entry tracks which side of the gate Phase 2 is on; other repo docs point here rather than restate it.
-- **Phase 3:** persistence adapters (`heurema-fjall`, `heurema-memory`) ship as sibling crates under this workspace.
+- **Phase 1:** API + RRF + stubs. Locked.
+- **Phase 2:** the source is gated on aletheia's krites clean-room rewrite (`aletheia#5954`, phase 05b) landing and then clearing its standalone-extraction gate (`aletheia#6060` / ADR-007, itself gated on phase 05g). Until that gate clears, `krites` is vendored CozoDB under MPL-2.0 (see `aletheia/crates/krites/NOTICE.md`) — moving it here would relocate a provenance question rather than resolve one, so HNSW and BM25 are written fresh here, with `krites` serving only as behavioural reference and its tests as a conformance oracle. Once the gate clears, the rewritten `krites` is standards-compliant and MPL-free and extraction becomes the live option. This entry tracks which side of the gate Phase 2 is on; other repo docs point here rather than restate it. Phase 3 was not gated on this phase and landed independently.
+- **Phase 3:** `thesauros` and `atmis` implement `PersistenceBackend` as sibling crates under this workspace.
 
 The long-run goal is retirement, not coexistence: heurēma exists so the derived engines in `krites` can be deleted. A phase that ships a second implementation beside the vendored one, without retiring it, has doubled the maintenance surface and resolved nothing.
 

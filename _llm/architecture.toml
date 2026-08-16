@@ -13,13 +13,14 @@ source_docs = [
 ]
 
 [architecture]
-summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. Single crate today; sibling adapter crates (heurema-fjall, heurema-memory) planned under the same workspace."
+summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. Three crates: the trait + RRF crate, and two PersistenceBackend adapter siblings (atmis, thesauros) under the same workspace."
 layers = [
   "public-api",
   "errors",
   "vector-index",
   "fts-index",
   "persistence",
+  "persistence-adapters",
   "rank-fusion",
 ]
 
@@ -27,6 +28,16 @@ layers = [
 name = "heurema"
 path = "crates/heurema"
 role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), Phase 1 typed stubs for HNSW + BM25, real reciprocal-rank-fusion implementation, and the workspace error chain."
+
+[[architecture.crates]]
+name = "atmis"
+path = "crates/atmis"
+role = "In-memory PersistenceBackend adapter: HashMap<String, Vec<u8>> snapshots behind an RwLock, encoded with serde_json. No disk I/O; the default backend for tests."
+
+[[architecture.crates]]
+name = "thesauros"
+path = "crates/thesauros"
+role = "Durable PersistenceBackend adapter: an fjall keyspace with separate vector_indexes/fts_indexes partitions, encoded with serde_json, fsyncing (PersistMode::SyncAll) after every write."
 
 [[interfaces]]
 crate = "heurema"

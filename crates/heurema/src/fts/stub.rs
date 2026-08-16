@@ -3,6 +3,8 @@
 use std::hash::Hash;
 use std::marker::PhantomData;
 
+use serde::{Deserialize, Serialize};
+
 use crate::HeuremaError;
 use crate::error::NotYetImplementedSnafu;
 use crate::fts::{FtsConfig, FtsIndex};
@@ -11,7 +13,11 @@ const FTS_PHASE_2_FEATURE: &str = "Phase 2: BM25 FTS not yet implemented";
 
 /// WHY: Phase 1 needs a concrete BM25 type so downstream trait bounds compile
 /// before the krites FTS implementation is extracted.
-#[derive(Debug, Clone)]
+///
+/// WHY `Serialize` + `Deserialize`: see [`crate::hnsw::HnswIndex`]; the same
+/// reasoning applies here (`_id: PhantomData<Id>` carries no bytes, so
+/// today's round-tripped state is `config` + `len`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bm25Index<Id> {
     config: FtsConfig,
     len: usize,

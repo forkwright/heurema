@@ -14,6 +14,11 @@ categories = ["data-structures"]
 
 [dependencies]
 snafu = { workspace = true }
+# WHY: PersistenceBackend's save/load methods bound `I` on Serialize /
+# DeserializeOwned (persistence.rs); HnswConfig, VectorDistance, HnswIndex,
+# FtsConfig, TokenizerConfig, and Bm25Index all derive both so a caller-chosen
+# concrete index type satisfies the bound.
+serde = { workspace = true }
 
 [lints]
 workspace = true
