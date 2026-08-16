@@ -8,9 +8,7 @@ use crate::HeuremaError;
 use crate::error::InvalidKConstantSnafu;
 
 /// WHY: The original RRF paper uses 60 as the standard rank dampening constant.
-// kanon:ignore RUST/pub-visibility -- fleet-external API surface (README's "API
-// surface" section): pinax/mneme build against this from separate repos, so no
-// same-workspace sibling import can confirm the consumer kanon's scan looks for.
+// kanon:ignore RUST/pub-visibility -- fleet-external API surface (README's "API surface" section): pinax/mneme build against this from separate repos, so no same-workspace sibling import can confirm the consumer kanon's scan looks for.
 pub const DEFAULT_RRF_K_CONSTANT: f32 = 60.0;
 
 /// WHY: Hybrid search consumers need a dependency-free way to combine vector,
@@ -30,9 +28,7 @@ pub const DEFAULT_RRF_K_CONSTANT: f32 = 60.0;
 /// Returns [`HeuremaError::InvalidKConstant`] when `k_constant` is not finite
 /// and positive.
 #[must_use = "fusion has no side effects; the fused ranking is the result"]
-// kanon:ignore RUST/pub-visibility -- fleet-external API surface (README's "API
-// surface" section): pinax/mneme build against this from separate repos, so no
-// same-workspace sibling import can confirm the consumer kanon's scan looks for.
+// kanon:ignore RUST/pub-visibility -- fleet-external API surface (README's "API surface" section): pinax/mneme build against this from separate repos, so no same-workspace sibling import can confirm the consumer kanon's scan looks for.
 pub fn rrf<Id: Ord + Clone>(
     rankings: &[Vec<(Id, f32)>],
     k_constant: f32,
@@ -50,9 +46,7 @@ pub fn rrf<Id: Ord + Clone>(
 /// Infallible: [`DEFAULT_RRF_K_CONSTANT`] always passes the [`rrf`] constant
 /// validation. The ordering contract is identical to [`rrf`].
 #[must_use = "fusion has no side effects; the fused ranking is the result"]
-// kanon:ignore RUST/pub-visibility -- fleet-external API surface (README's "API
-// surface" section): pinax/mneme build against this from separate repos, so no
-// same-workspace sibling import can confirm the consumer kanon's scan looks for.
+// kanon:ignore RUST/pub-visibility -- fleet-external API surface (README's "API surface" section): pinax/mneme build against this from separate repos, so no same-workspace sibling import can confirm the consumer kanon's scan looks for.
 pub fn rrf_with_default<Id: Ord + Clone>(rankings: &[Vec<(Id, f32)>]) -> Vec<(Id, f32)> {
     // INVARIANT: DEFAULT_RRF_K_CONSTANT is a finite positive literal, so the
     // rrf() validation can never reject it and fusion proceeds directly.
