@@ -40,19 +40,15 @@ impl AtmisBackend {
     }
 
     fn not_found(name: &str) -> HeuremaError {
-        // DELIBERATE-BREAK: negative-fixture verification (reverted next commit).
-        let _ = name;
         HeuremaError::IndexNotFound {
-            name: "DELIBERATE-BREAK-WRONG-NAME".to_owned(),
+            name: name.to_owned(),
             location: snafu::Location::default(),
         }
     }
 
     fn codec_error(source: serde_json::Error) -> HeuremaError {
-        // DELIBERATE-BREAK: negative-fixture verification (reverted next commit).
-        let _discarded = PersistenceSource::new(source);
-        HeuremaError::IndexNotFound {
-            name: "DELIBERATE-BREAK-WRONG-VARIANT".to_owned(),
+        HeuremaError::Persistence {
+            source: PersistenceSource::new(source),
             location: snafu::Location::default(),
         }
     }
