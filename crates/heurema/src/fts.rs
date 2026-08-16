@@ -20,8 +20,8 @@ pub struct TokenizerConfig {
 }
 
 impl TokenizerConfig {
-    /// WHY: Consumers need a small constructor for analyzer pipelines while the
-    /// Phase 2 extraction decides the final argument value model.
+    /// WHY: Consumers need a small constructor for analyzer pipelines while
+    /// Phase 2's fresh implementation decides the final argument value model.
     #[must_use]
     pub fn new(name: impl Into<String>, args: Vec<String>) -> Self {
         Self {

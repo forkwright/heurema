@@ -15,8 +15,8 @@
 
 mod error;
 
-/// WHY: Full-text search needs a shared trait boundary before BM25 extraction
-/// moves out of krites.
+/// WHY: Full-text search needs a shared trait boundary before Phase 2 writes
+/// BM25 fresh here.
 pub mod fts;
 /// WHY: HNSW vector search needs one fleet implementation and one correctness
 /// proof instead of per-consumer graph implementations.
