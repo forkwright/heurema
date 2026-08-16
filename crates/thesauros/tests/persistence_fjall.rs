@@ -12,8 +12,8 @@
 use serde::{Deserialize, Serialize};
 
 use heurema::{
-    Bm25Index, FtsConfig, FtsIndex, HeuremaError, HnswConfig, HnswIndex, PersistenceBackend,
-    TokenizerConfig, VectorDistance, VectorIndex,
+    Bm25Index, FtsConfig, HeuremaError, HnswConfig, HnswIndex, PersistenceBackend,
+    PersistenceSource, TokenizerConfig, VectorDistance, VectorIndex,
 };
 use thesauros::ThesaurosBackend;
 
@@ -38,22 +38,31 @@ fn fts_config() -> FtsConfig {
     config
 }
 
+// WHY: test setup (tempdir, blocking-file write) fails with `io::Error`,
+// distinct from every backend call's `HeuremaError`. Routing both through
+// `PersistenceSource` lets every test return `Result<(), HeuremaError>` and
+// propagate with `?` instead of `.expect()` — `unwrap_used`/`expect_used`
+// are workspace-lint warnings that `-D warnings` promotes to hard errors,
+// and clippy does not exempt `#[test]` functions from them here.
+fn io_error(source: std::io::Error) -> HeuremaError {
+    HeuremaError::Persistence {
+        source: PersistenceSource::new(source),
+        location: snafu::Location::default(),
+    }
+}
+
 #[test]
-fn vector_index_survives_close_and_reopen() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn vector_index_survives_close_and_reopen() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
 
     {
-        let backend = ThesaurosBackend::open(dir.path()).expect("open keyspace");
-        backend
-            .save_vector_index("embeddings", &HnswIndex::<u64>::new(vector_config()))
-            .expect("save vector index");
+        let backend = ThesaurosBackend::open(dir.path())?;
+        backend.save_vector_index("embeddings", &HnswIndex::<u64>::new(vector_config()))?;
     } // WHY: the backend, its Keyspace, and both PartitionHandles drop here —
     // the only handle onto this fjall database goes away before reopening.
 
-    let reopened = ThesaurosBackend::open(dir.path()).expect("reopen keyspace");
-    let loaded: HnswIndex<u64> = reopened
-        .load_vector_index("embeddings")
-        .expect("load vector index");
+    let reopened = ThesaurosBackend::open(dir.path())?;
+    let loaded: HnswIndex<u64> = reopened.load_vector_index("embeddings")?;
 
     assert_eq!(
         loaded.config(),
@@ -61,35 +70,33 @@ fn vector_index_survives_close_and_reopen() {
         "every field of the saved config must survive a real close-and-reopen, \
          not just dimensions"
     );
+    Ok(())
 }
 
 #[test]
-fn fts_index_survives_close_and_reopen() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn fts_index_survives_close_and_reopen() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
 
     {
-        let backend = ThesaurosBackend::open(dir.path()).expect("open keyspace");
-        backend
-            .save_fts_index("documents", &Bm25Index::<String>::new(fts_config()))
-            .expect("save fts index");
+        let backend = ThesaurosBackend::open(dir.path())?;
+        backend.save_fts_index("documents", &Bm25Index::<String>::new(fts_config()))?;
     }
 
-    let reopened = ThesaurosBackend::open(dir.path()).expect("reopen keyspace");
-    let loaded: Bm25Index<String> = reopened
-        .load_fts_index("documents")
-        .expect("load fts index");
+    let reopened = ThesaurosBackend::open(dir.path())?;
+    let loaded: Bm25Index<String> = reopened.load_fts_index("documents")?;
 
     assert_eq!(
         loaded.config(),
         &fts_config(),
         "the non-default tokenizer and filter list must survive a real close-and-reopen"
     );
+    Ok(())
 }
 
 #[test]
-fn load_vector_index_without_a_prior_save_is_index_not_found() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let backend = ThesaurosBackend::open(dir.path()).expect("open keyspace");
+fn load_vector_index_without_a_prior_save_is_index_not_found() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
+    let backend = ThesaurosBackend::open(dir.path())?;
 
     match backend.load_vector_index::<HnswIndex<u64>>("never-saved") {
         Err(HeuremaError::IndexNotFound { name, .. }) => {
@@ -101,12 +108,13 @@ fn load_vector_index_without_a_prior_save_is_index_not_found() {
         Ok(_) => panic!("a name with no prior save must not load"),
         Err(other) => panic!("expected IndexNotFound, got {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn load_fts_index_without_a_prior_save_is_index_not_found() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let backend = ThesaurosBackend::open(dir.path()).expect("open keyspace");
+fn load_fts_index_without_a_prior_save_is_index_not_found() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
+    let backend = ThesaurosBackend::open(dir.path())?;
 
     match backend.load_fts_index::<Bm25Index<String>>("never-saved") {
         Err(HeuremaError::IndexNotFound { name, .. }) => {
@@ -118,85 +126,66 @@ fn load_fts_index_without_a_prior_save_is_index_not_found() {
         Ok(_) => panic!("a name with no prior save must not load"),
         Err(other) => panic!("expected IndexNotFound, got {other:?}"),
     }
+    Ok(())
 }
 
 #[test]
-fn save_vector_index_is_idempotent() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let backend = ThesaurosBackend::open(dir.path()).expect("open keyspace");
+fn save_vector_index_is_idempotent() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
+    let backend = ThesaurosBackend::open(dir.path())?;
     let index = HnswIndex::<u64>::new(vector_config());
 
-    backend
-        .save_vector_index("embeddings", &index)
-        .expect("first save");
-    let first: HnswIndex<u64> = backend
-        .load_vector_index("embeddings")
-        .expect("load after first save");
+    backend.save_vector_index("embeddings", &index)?;
+    let first: HnswIndex<u64> = backend.load_vector_index("embeddings")?;
 
     // WHY: TESTING.md's idempotency pattern — call the operation, capture
     // state, call it again with identical input, assert state is
     // unchanged.
-    backend
-        .save_vector_index("embeddings", &index)
-        .expect("second save");
-    let second: HnswIndex<u64> = backend
-        .load_vector_index("embeddings")
-        .expect("load after second save");
+    backend.save_vector_index("embeddings", &index)?;
+    let second: HnswIndex<u64> = backend.load_vector_index("embeddings")?;
 
     assert_eq!(
         first.config(),
         second.config(),
         "replaying an identical save must not change the loaded snapshot"
     );
+    Ok(())
 }
 
 #[test]
-fn save_fts_index_is_idempotent() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let backend = ThesaurosBackend::open(dir.path()).expect("open keyspace");
+fn save_fts_index_is_idempotent() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
+    let backend = ThesaurosBackend::open(dir.path())?;
     let index = Bm25Index::<String>::new(fts_config());
 
-    backend
-        .save_fts_index("documents", &index)
-        .expect("first save");
-    let first: Bm25Index<String> = backend
-        .load_fts_index("documents")
-        .expect("load after first save");
+    backend.save_fts_index("documents", &index)?;
+    let first: Bm25Index<String> = backend.load_fts_index("documents")?;
 
-    backend
-        .save_fts_index("documents", &index)
-        .expect("second save");
-    let second: Bm25Index<String> = backend
-        .load_fts_index("documents")
-        .expect("load after second save");
+    backend.save_fts_index("documents", &index)?;
+    let second: Bm25Index<String> = backend.load_fts_index("documents")?;
 
     assert_eq!(
         first.config(),
         second.config(),
         "replaying an identical save must not change the loaded snapshot"
     );
+    Ok(())
 }
 
 #[test]
-fn save_vector_index_replaces_rather_than_merges() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let backend = ThesaurosBackend::open(dir.path()).expect("open keyspace");
+fn save_vector_index_replaces_rather_than_merges() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
+    let backend = ThesaurosBackend::open(dir.path())?;
     let first_config = HnswConfig::new(3);
     let mut second_config = HnswConfig::new(3);
     second_config.dimensions = 768;
 
-    backend
-        .save_vector_index("catalog-entry", &HnswIndex::<u64>::new(first_config))
-        .expect("first save");
-    backend
-        .save_vector_index(
-            "catalog-entry",
-            &HnswIndex::<u64>::new(second_config.clone()),
-        )
-        .expect("second save");
-    let loaded: HnswIndex<u64> = backend
-        .load_vector_index("catalog-entry")
-        .expect("load after both saves");
+    backend.save_vector_index("catalog-entry", &HnswIndex::<u64>::new(first_config))?;
+    backend.save_vector_index(
+        "catalog-entry",
+        &HnswIndex::<u64>::new(second_config.clone()),
+    )?;
+    let loaded: HnswIndex<u64> = backend.load_vector_index("catalog-entry")?;
 
     assert_eq!(
         loaded.config(),
@@ -204,23 +193,25 @@ fn save_vector_index_replaces_rather_than_merges() {
         "per the trait's documented contract, the second save must win outright — \
          a merge or an error would both violate last-write-wins"
     );
+    Ok(())
 }
 
 #[test]
-fn open_reports_persistence_error_when_path_is_not_a_directory() {
-    let dir = tempfile::tempdir().expect("temp dir");
+fn open_reports_persistence_error_when_path_is_not_a_directory() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
     let blocked_path = dir.path().join("not-a-directory");
     std::fs::write(
         &blocked_path,
         b"occupies the path fjall would open as a keyspace",
     )
-    .expect("write blocking file");
+    .map_err(io_error)?;
 
     match ThesaurosBackend::open(&blocked_path) {
         Err(HeuremaError::Persistence { .. }) => {}
         Ok(_) => panic!("fjall cannot open a keyspace at a path that is already a regular file"),
         Err(other) => panic!("expected Persistence, got {other:?}"),
     }
+    Ok(())
 }
 
 /// WHY: a probe [`VectorIndex`] with a JSON shape incompatible with
@@ -253,12 +244,10 @@ impl VectorIndex for ProbeVectorIndex {
 }
 
 #[test]
-fn load_vector_index_reports_persistence_error_on_shape_mismatch() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let backend = ThesaurosBackend::open(dir.path()).expect("open keyspace");
-    backend
-        .save_vector_index("catalog-entry", &HnswIndex::<u64>::new(HnswConfig::new(3)))
-        .expect("save vector index");
+fn load_vector_index_reports_persistence_error_on_shape_mismatch() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
+    let backend = ThesaurosBackend::open(dir.path())?;
+    backend.save_vector_index("catalog-entry", &HnswIndex::<u64>::new(HnswConfig::new(3)))?;
 
     match backend.load_vector_index::<ProbeVectorIndex>("catalog-entry") {
         Err(HeuremaError::Persistence { .. }) => {}
@@ -267,4 +256,5 @@ fn load_vector_index_reports_persistence_error_on_shape_mismatch() {
         }
         Err(other) => panic!("expected Persistence, got {other:?}"),
     }
+    Ok(())
 }
