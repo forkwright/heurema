@@ -58,6 +58,8 @@ status = "accepted"
 context = "Phase 2's source (write-fresh vs. extract-from-krites) was answered both ways across eight surfaces (heurema#21) because the answer had genuinely depended on a then-open condition: aletheia's krites clean-room rewrite (phase 05b, aletheia#5954) and its standalone-extraction gate (aletheia#6060 / ADR-007, gated on phase 05g). Phase 05g shipped in v0.35.0, closing that gate."
 decision = "HNSW and BM25 are written fresh in heurema, permanently. krites is replaced by its own clean-room rewrite, not relocated into heurema — extraction is not the live option on the far side of the gate, contrary to what the gate's existence implied while open. krites serves only as behavioural reference and its tests as a conformance oracle."
 consequences = "Every surface stating the Phase 2 source points at CLAUDE.md's Roadmap entry, which carries this ruling, rather than restating either side. No future re-litigation: the gate this decision used to track is closed, not just currently-closed."
+[[decision]]
+id = "heurema-license-mpl"
 title = "MPL-2.0, not AGPL-3.0-or-later"
 status = "accepted"
 context = "heurema shipped AGPL-3.0-or-later by inheriting the aletheia convention. That silently excluded most of its intended consumers: kanon, logismos and daimon are LicenseRef-PolyForm-Shield-1.0.0 and cannot grant AGPL section 5(c) and 13 terms, so an AGPL heurema could legally serve only aletheia. The same choice also left the krites provenance question open, since the code krites vendored is MPL-2.0 CozoDB."
