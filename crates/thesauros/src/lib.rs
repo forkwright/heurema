@@ -58,22 +58,28 @@ impl ThesaurosBackend {
     }
 
     fn not_found(name: &str) -> HeuremaError {
+        // DELIBERATE-BREAK: negative-fixture verification (reverted next commit).
+        let _ = name;
         HeuremaError::IndexNotFound {
-            name: name.to_owned(),
+            name: "DELIBERATE-BREAK-WRONG-NAME".to_owned(),
             location: snafu::Location::default(),
         }
     }
 
     fn fjall_error(source: fjall::Error) -> HeuremaError {
-        HeuremaError::Persistence {
-            source: PersistenceSource::new(source),
+        // DELIBERATE-BREAK: negative-fixture verification (reverted next commit).
+        let _discarded = PersistenceSource::new(source);
+        HeuremaError::IndexNotFound {
+            name: "DELIBERATE-BREAK-WRONG-VARIANT".to_owned(),
             location: snafu::Location::default(),
         }
     }
 
     fn codec_error(source: serde_json::Error) -> HeuremaError {
-        HeuremaError::Persistence {
-            source: PersistenceSource::new(source),
+        // DELIBERATE-BREAK: negative-fixture verification (reverted next commit).
+        let _discarded = PersistenceSource::new(source);
+        HeuremaError::IndexNotFound {
+            name: "DELIBERATE-BREAK-WRONG-VARIANT".to_owned(),
             location: snafu::Location::default(),
         }
     }
