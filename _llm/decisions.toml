@@ -52,6 +52,14 @@ decision = "Named the durable adapter thesauros (θησαυρός, storehouse/tr
 consequences = "Renamed before anything could consume the old names: crate directories, Cargo.toml package names, struct names (FjallBackend -> ThesaurosBackend, MemoryBackend -> AtmisBackend), and every doc reference in this repo (README.md, CLAUDE.md, AGENTS.md, this file, architecture.toml, current_state.toml). The dispatch brief that requested heurema-fjall / heurema-memory predates this check; a trait or a crate name with zero prior consumers is the cheapest possible moment to fix a naming mistake, and this repo's own NAMING.md source stops the mistake here rather than filing it as a future migration."
 
 [[decision]]
+id = "heurema-deny-toml-once-cell-unbanned"
+title = "deny.toml carries no once_cell ban, unlike its lazy_static sibling"
+status = "accepted"
+context = "thesauros's fjall dependency (crates/thesauros/Cargo.toml) pulls once_cell transitively through four different direct parents — dashmap, enum_dispatch, path-dedot, tempfile — none of them heurema code, none of them avoidable without forking fjall. deny.toml previously carried a hard [[bans.deny]] entry for once_cell (RUST.md's fleet-wide std::sync::LazyLock ban), which fails cargo deny on the whole resolved dependency tree, not just first-party imports. Verified via a real CI failure (gh run view --log-failed) before the fix, not guessed."
+decision = "Removed the once_cell [[bans.deny]] entry. kanon's own deny.toml, which also depends on fjall via archeion, carries no once_cell ban either. The fleet-wide RUST.md rule is enforced at the source-grep level instead (basanos RUST/banned-crates, crates/basanos/src/rules/rust_banned.rs:50), which greps heurema's own source and would still catch a first-party `use once_cell::` — that is the correct enforcement layer for a first-party-only rule; a transitive-dependency-wide cargo-deny ban is not."
+consequences = "If a future dependency bump changes which crate in the fjall tree pulls once_cell, or removes the dependency on it entirely, this decision does not need revisiting either way — the ban stays absent regardless, since the rule it enforces (no first-party once_cell import) is unaffected by what a third-party dependency does internally. Do not re-add the [[bans.deny]] entry without first checking whether fjall's tree still needs it; re-adding it blindly reintroduces this exact failure."
+
+[[decision]]
 id = "heurema-persistence-serde-bound"
 title = "PersistenceBackend save/load methods bound I on Serialize / DeserializeOwned"
 status = "accepted"
