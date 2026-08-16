@@ -2,6 +2,8 @@
 
 use std::hash::Hash;
 
+use serde::{Deserialize, Serialize};
+
 use crate::HeuremaError;
 
 mod stub;
@@ -14,7 +16,10 @@ const DEFAULT_M_NEIGHBOURS: usize = 16;
 /// WHY: Krites supports these distance modes today; Heurēma keeps them in the
 /// public API so its independently-written implementation preserves the
 /// query-engine semantics krites already established.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// WHY `Serialize` + `Deserialize`: a `PersistenceBackend` adapter encodes an
+/// index's `HnswConfig` as part of its snapshot bytes; see `persistence.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum VectorDistance {
     /// Squared Euclidean distance.
@@ -27,7 +32,18 @@ pub enum VectorDistance {
 
 /// WHY: HNSW construction parameters must be explicit because graph quality,
 /// recall, and storage shape depend on them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// WHY `Serialize` + `Deserialize`: see [`VectorDistance`]. `new` fills
+/// defaults for the unset fields but validates nothing, so every field
+/// combination deserializes to a valid value; this is a pure data-transfer
+/// type, not a validated newtype, and the plain derive is the correct form
+/// per `RUST.md` § Serde validation. `deny_unknown_fields` still applies —
+/// bytes decoding as a different concrete config shape under a shared
+/// `PersistenceBackend` snapshot name is a real failure mode
+/// (`crates/thesauros/tests/persistence_fjall.rs` exercises it), and a
+/// closed schema turns a silent partial-match into an explicit decode error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct HnswConfig {
     /// Vector dimensionality accepted by the index.

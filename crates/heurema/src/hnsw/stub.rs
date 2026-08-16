@@ -3,6 +3,8 @@
 use std::hash::Hash;
 use std::marker::PhantomData;
 
+use serde::{Deserialize, Serialize};
+
 use crate::HeuremaError;
 use crate::error::{DimensionMismatchSnafu, NotYetImplementedSnafu};
 use crate::hnsw::{HnswConfig, VectorIndex};
@@ -11,7 +13,23 @@ const HNSW_PHASE_2_FEATURE: &str = "Phase 2: HNSW not yet implemented";
 
 /// WHY: Phase 1 needs a concrete HNSW type so downstream trait bounds compile
 /// before Phase 2's fresh graph implementation lands.
-#[derive(Debug, Clone)]
+///
+/// WHY `Serialize` + `Deserialize`: a `PersistenceBackend` adapter needs to
+/// encode and reconstruct a whole `HnswIndex<Id>` snapshot; see
+/// `persistence.rs`. `_id: PhantomData<Id>` carries no bytes either way, so
+/// the round-tripped state today is `config` + `len`, matching Phase 1's
+/// stub reality where no `insert` has ever mutated `len` past zero.
+///
+/// WHY `deny_unknown_fields`: `save_vector_index`/`load_vector_index`
+/// (`persistence.rs`) encode and decode this type itself, not only its
+/// nested `config` field — `HnswConfig` already closes its own schema for
+/// exactly this reason (`hnsw.rs`), but that guard stops at the field
+/// boundary. A snapshot from a different concrete `VectorIndex` type that
+/// happens to be a field superset of `HnswIndex` would otherwise decode
+/// here silently instead of failing loudly, the same wrong-shape-under-a-
+/// shared-name hazard one level up (`persistence_schema_closed.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HnswIndex<Id> {
     config: HnswConfig,
     len: usize,

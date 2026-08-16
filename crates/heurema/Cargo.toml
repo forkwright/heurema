@@ -14,6 +14,18 @@ categories = ["data-structures"]
 
 [dependencies]
 snafu = { workspace = true }
+# WHY: PersistenceBackend's save/load methods bound `I` on Serialize /
+# DeserializeOwned (persistence.rs); HnswConfig, VectorDistance, HnswIndex,
+# FtsConfig, TokenizerConfig, and Bm25Index all derive both so a caller-chosen
+# concrete index type satisfies the bound.
+serde = { workspace = true }
+
+# WHY dev-only: the library itself never encodes bytes (that's the adapter
+# crates' job); persistence_schema_closed.rs decodes hand-built JSON directly
+# to prove HnswIndex/Bm25Index close their schema at the type level,
+# independent of any adapter.
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

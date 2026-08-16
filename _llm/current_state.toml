@@ -10,9 +10,13 @@ source_docs = [
 ]
 
 [state]
-summary = "Phase 1 ships the public API surface, the real reciprocal-rank-fusion implementation, and typed stubs for HNSW + BM25. Consumers can build against the trait shape today; HNSW + BM25 bodies are written fresh in Phase 2, with aletheia's krites serving only as behavioural reference and conformance oracle."
-current_phase = "Phase 1: scaffold + API + RRF"
+summary = "Phase 1 ships the public API surface, the real reciprocal-rank-fusion implementation, and typed stubs for HNSW + BM25. Phase 3 ships both PersistenceBackend adapters (atmis, thesauros), unblocked by Phase 2. Consumers can build against the trait shape today; HNSW + BM25 bodies are written fresh in Phase 2, with aletheia's krites serving only as behavioural reference and conformance oracle; persistence is real now."
+current_phase = "Phase 1 API/RRF locked; Phase 3 persistence adapters implemented; Phase 2 HNSW/BM25 written fresh, permanently (krites is reference/oracle only, never a code source)"
 updated = "2026-08-15"
+
+[[recent]]
+date = "2026-08-15"
+item = "atmis and thesauros implement PersistenceBackend; the trait's save/load methods gained Serialize / DeserializeOwned bounds on I (persistence.rs) since VectorIndex/FtsIndex expose no constructor a generic load could otherwise build I from."
 
 [[recent]]
 date = "2026-05-28"
@@ -30,10 +34,4 @@ item = "Project initiated from fleet storage-tier audit; one HNSW + one BM25 acr
 id = "phase-2-implementation"
 title = "Write HNSW and BM25 fresh in heurema"
 blocked_on = "none — aletheia Phase 05g shipped in v0.35.0; krites is behavioural reference and conformance oracle only, not a dependency of this work"
-notes = "Phase 1 is not blocked either — only the stubs depend on this thread."
-
-[[open_threads]]
-id = "phase-3-persistence-adapters"
-title = "Ship heurema-fjall and heurema-memory as sibling workspace crates"
-blocked_on = "Phase 2 completion"
-notes = "Adapter shape designed but unimplemented; default consumer expectation is fjall-backed durability."
+notes = "Phase 1 is not blocked either — only the stubs depend on this thread. Phase 3 (persistence) also does not depend on this thread; it landed independently."
