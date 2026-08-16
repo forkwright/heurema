@@ -10,7 +10,7 @@ use crate::fts::{FtsConfig, FtsIndex};
 const FTS_PHASE_2_FEATURE: &str = "Phase 2: BM25 FTS not yet implemented";
 
 /// WHY: Phase 1 needs a concrete BM25 type so downstream trait bounds compile
-/// before the krites FTS implementation is extracted.
+/// before Phase 2's fresh FTS implementation lands.
 #[derive(Debug, Clone)]
 pub struct Bm25Index<Id> {
     config: FtsConfig,

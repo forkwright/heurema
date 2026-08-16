@@ -12,7 +12,8 @@ const DEFAULT_EF_CONSTRUCTION: usize = 50;
 const DEFAULT_M_NEIGHBOURS: usize = 16;
 
 /// WHY: Krites supports these distance modes today; Heurēma keeps them in the
-/// public API so extraction does not change query-engine semantics.
+/// public API so its independently-written implementation preserves the
+/// query-engine semantics krites already established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VectorDistance {
