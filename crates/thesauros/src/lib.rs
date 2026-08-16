@@ -65,10 +65,8 @@ impl ThesaurosBackend {
     }
 
     fn fjall_error(source: fjall::Error) -> HeuremaError {
-        // DELIBERATE-BREAK: negative-fixture verification (reverted next commit).
-        let _discarded = PersistenceSource::new(source);
-        HeuremaError::IndexNotFound {
-            name: "DELIBERATE-BREAK-WRONG-VARIANT".to_owned(),
+        HeuremaError::Persistence {
+            source: PersistenceSource::new(source),
             location: snafu::Location::default(),
         }
     }
