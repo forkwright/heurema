@@ -17,7 +17,12 @@ const FTS_PHASE_2_FEATURE: &str = "Phase 2: BM25 FTS not yet implemented";
 /// WHY `Serialize` + `Deserialize`: see [`crate::hnsw::HnswIndex`]; the same
 /// reasoning applies here (`_id: PhantomData<Id>` carries no bytes, so
 /// today's round-tripped state is `config` + `len`).
+///
+/// WHY `deny_unknown_fields`: see [`crate::hnsw::HnswIndex`] — the same
+/// top-level closed-schema reasoning applies here, one level above
+/// `FtsConfig`'s own guard.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Bm25Index<Id> {
     config: FtsConfig,
     len: usize,
