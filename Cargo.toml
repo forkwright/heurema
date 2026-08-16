@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.94"
 license = "MPL-2.0"
@@ -16,7 +16,7 @@ repository = "https://github.com/forkwright/heurema"
 authors = ["forkwright"]
 
 [workspace.dependencies]
-heurema = { version = "0.1.3", path = "crates/heurema" }
+heurema = { version = "0.2.0", path = "crates/heurema" }
 # WHY these two are not `heurema-*`: NAMING.md forbids the `[fleet-repo]-[role]`
 # shape (it lists `aletheia-classify`, `harmonia-convert`, `aletheia-memory-mcp`
 # as exactly this anti-pattern), and `NAMING/no-owner-prefix` flags
@@ -25,8 +25,8 @@ heurema = { version = "0.1.3", path = "crates/heurema" }
 # "to place," names the act) and `atmis` (ἀτμίς, vapor — the crate's state
 # rises in the process's memory and leaves no residue when the process ends)
 # are independent GNOMON coinages, not sub-senses of `heurema` itself.
-thesauros = { version = "0.1.3", path = "crates/thesauros" }
-atmis = { version = "0.1.3", path = "crates/atmis" }
+thesauros = { version = "0.2.0", path = "crates/thesauros" }
+atmis = { version = "0.2.0", path = "crates/atmis" }
 
 # WHY: snafu is the fleet-wide error library per kanon RUST.md. Pinned at the
 # workspace root so the single heurema crate inherits via `workspace = true`,
