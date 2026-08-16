@@ -12,7 +12,7 @@ use crate::hnsw::{HnswConfig, VectorIndex};
 const HNSW_PHASE_2_FEATURE: &str = "Phase 2: HNSW not yet implemented";
 
 /// WHY: Phase 1 needs a concrete HNSW type so downstream trait bounds compile
-/// before the krites graph implementation is extracted.
+/// before Phase 2's fresh graph implementation lands.
 ///
 /// WHY `Serialize` + `Deserialize`: a `PersistenceBackend` adapter needs to
 /// encode and reconstruct a whole `HnswIndex<Id>` snapshot; see

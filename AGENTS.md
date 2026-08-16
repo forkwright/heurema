@@ -12,7 +12,7 @@ heurēma is a fleet substrate providing HNSW vector, BM25 full-text, persistence
 
 Agents working here:
 
-- work Phase 2 HNSW and BM25 per the source gate in `CLAUDE.md`'s Roadmap section (write-fresh now; extraction once that gate clears);
+- work Phase 2 HNSW and BM25 written fresh, per `CLAUDE.md`'s Roadmap section — `krites` is behavioural reference and conformance oracle only, permanently, never a code source;
 - maintain the `thesauros` / `atmis` `PersistenceBackend` adapters;
 - fix CI / lint / gate failures;
 - maintain the trait surface against consumer drift.
@@ -43,6 +43,6 @@ Every PR commit carries `Gate-Passed: <sha>+<iso-8601-timestamp>` (or the legacy
 |------|---------|-----------|
 | `kanon/projects/heurema/` | planning artifacts (STATE.md, ROADMAP.md, vision.md, design.md) | heurēma reads; updates happen there |
 | `kanon/crates/basanos/standards/` | universal standards | heurēma reads; never edits from here |
-| `aletheia/crates/krites/` | Phase 2 behavioural reference + conformance oracle; becomes the code source once `CLAUDE.md`'s Roadmap gate clears | heurēma reads; aletheia owns the original |
+| `aletheia/crates/krites/` | Phase 2 behavioural reference + conformance oracle, permanently — never a code source (see `CLAUDE.md`'s Roadmap section) | heurēma reads; aletheia owns the original |
 
 Any change that touches the public API surface must also update kanon's `projects/heurema/STATE.md` and any consumer's pinned version.

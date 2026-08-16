@@ -45,8 +45,9 @@ impl std::error::Error for PersistenceSource {
 #[snafu(visibility(pub))]
 #[non_exhaustive]
 pub enum HeuremaError {
-    /// WHY: HNSW extraction must preserve krites's strict vector dimension
-    /// checks instead of silently accepting malformed query vectors.
+    /// WHY: The fresh HNSW implementation must reproduce krites's strict
+    /// vector dimension checks instead of silently accepting malformed query
+    /// vectors.
     #[snafu(display("vector dimension mismatch: expected {expected}, got {actual}"))]
     DimensionMismatch {
         /// Expected vector dimension.
@@ -91,10 +92,11 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
-    /// WHY: Phase 1 commits the public API before the krites extraction lands.
+    /// WHY: Phase 1 commits the public API before Phase 2's fresh HNSW/BM25
+    /// implementations land.
     #[snafu(display("not yet implemented: {feature}"))]
     NotYetImplemented {
-        /// Feature blocked on Phase 2 extraction.
+        /// Feature not yet implemented; lands in Phase 2.
         feature: String,
         /// Error creation location.
         #[snafu(implicit)]
