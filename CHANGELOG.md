@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/forkwright/heurema/compare/v0.1.3...v0.2.0) (2026-08-16)
+
+
+### Features
+
+* **workspace:** implement PersistenceBackend with thesauros and atmis ([#24](https://github.com/forkwright/heurema/issues/24)) ([62e26ed](https://github.com/forkwright/heurema/commit/62e26eddcca51d3d2cd6becad85401d151ce0f9f))
+
 ## [0.1.3](https://github.com/forkwright/heurema/compare/v0.1.2...v0.1.3) (2026-08-03)
 
 

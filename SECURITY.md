@@ -47,6 +47,6 @@ After a fix ships, we publish a GitHub Security Advisory when warranted, with af
 
 heurēma follows the fleet security standards maintained in `~/dev/kanon/crates/basanos/standards/SECURITY.md`. In particular:
 
-- `unsafe_code = "forbid"` workspace-wide. Phase 2 HNSW extraction must stay safe Rust.
+- `unsafe_code = "forbid"` workspace-wide. Phase 2's fresh HNSW implementation must stay safe Rust.
 - No silent truncation: no `as` for numeric conversions in production code paths.
 - Backend errors are type-erased only at the `PersistenceSource` boundary, so the error chain stays walkable.

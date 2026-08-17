@@ -1,0 +1,42 @@
+[package]
+name = "thesauros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "fjall-backed durable PersistenceBackend adapter for heurema indexes."
+readme = "../../README.md"
+keywords = ["search", "persistence", "fjall"]
+categories = ["data-structures"]
+
+[dependencies]
+heurema = { workspace = true }
+# WHY: HeuremaError's variants carry a `snafu::Location` field this adapter
+# populates directly (`HeuremaError::IndexNotFound { location, .. }`), so
+# `snafu::Location` must resolve here even though heurema itself already
+# depends on snafu — a dependency's dependency is not implicitly visible.
+snafu = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+fjall = { workspace = true }
+
+# WHY: only this crate opens a fjall keyspace in tests, so tempfile stays a
+# per-crate dev-dependency instead of a workspace-level entry.
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
+
+# WHY: maturity flag is read by the kanon substrate registry so consumers can
+# tell at a glance which API surfaces are still pre-stabilization. Phase 3
+# per heurema's own CLAUDE.md Roadmap: persistence adapters as sibling
+# workspace crates, unblocked by Phase 2 (HNSW/BM25 real engines).
+[package.metadata.kanon]
+maturity = "alpha"
+since = "2026-08-15"
+phase = "3"
+phase-description = "PersistenceBackend adapter: fjall keyspace with vector_indexes/fts_indexes partitions, encoded with serde_json, PersistMode::SyncAll after every write"

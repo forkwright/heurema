@@ -2,6 +2,8 @@
 
 use std::hash::Hash;
 
+use serde::{Deserialize, Serialize};
+
 use crate::HeuremaError;
 
 mod stub;
@@ -10,7 +12,15 @@ pub use stub::Bm25Index;
 
 /// WHY: Krites models tokenizers and filters as named components with argument
 /// lists; Heurēma keeps that shape without importing krites `DataValue`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// WHY `Serialize` + `Deserialize`: a `PersistenceBackend` adapter encodes a
+/// `Bm25Index`'s `FtsConfig` (which nests this type) as part of its snapshot
+/// bytes; see `persistence.rs`. Every field combination is a valid
+/// tokenizer/filter name plus argument list — no invariant is enforced here
+/// for the plain derive to bypass. `deny_unknown_fields` still applies: see
+/// [`FtsConfig`] for why a closed schema matters at this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct TokenizerConfig {
     /// Tokenizer or filter name, such as `Simple`, `NGram`, or `Stemmer`.
@@ -20,8 +30,8 @@ pub struct TokenizerConfig {
 }
 
 impl TokenizerConfig {
-    /// WHY: Consumers need a small constructor for analyzer pipelines while the
-    /// Phase 2 extraction decides the final argument value model.
+    /// WHY: Consumers need a small constructor for analyzer pipelines while
+    /// Phase 2's fresh implementation decides the final argument value model.
     #[must_use]
     pub fn new(name: impl Into<String>, args: Vec<String>) -> Self {
         Self {
@@ -33,7 +43,16 @@ impl TokenizerConfig {
 
 /// WHY: FTS configuration must preserve the tokenizer-plus-filter pipeline
 /// model used by krites today.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// WHY `Serialize` + `Deserialize`: see [`TokenizerConfig`].
+///
+/// WHY `deny_unknown_fields`: bytes decoding as a different concrete config
+/// shape under a shared `PersistenceBackend` snapshot name is a real
+/// failure mode (`crates/atmis/tests/persistence_memory.rs` exercises it),
+/// and a closed schema turns a silent partial-match into an explicit decode
+/// error instead of loading a plausible-looking wrong value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct FtsConfig {
     /// Base tokenizer used to split documents and queries.

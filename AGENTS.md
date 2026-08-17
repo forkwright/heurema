@@ -8,12 +8,12 @@ tightens: phase-specific dispatch prompts may override defaults with justificati
 
 ## Purpose
 
-heurēma is a single-crate fleet substrate providing HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion primitives. Consumed externally by fleet query engines (`pinax` for SQL, `mneme` for Datalog) and by aletheia's `krites` memory stack (per ADR-003: aletheia's memory stack stays internal but is free to adopt heurēma when it chooses).
+heurēma is a fleet substrate providing HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion primitives: the `heurema` trait + RRF crate plus its `thesauros` (durable) and `atmis` (in-memory) `PersistenceBackend` sibling crates. Consumed externally by fleet query engines (`pinax` for SQL, `mneme` for Datalog) and by aletheia's `krites` memory stack (per ADR-003: aletheia's memory stack stays internal but is free to adopt heurēma when it chooses).
 
 Agents working here:
 
-- land Phase 2 HNSW and BM25 extractions from aletheia/krites;
-- add persistence adapter sub-crates (`heurema-fjall`, `heurema-memory`);
+- work Phase 2 HNSW and BM25 written fresh, per `CLAUDE.md`'s Roadmap section — `krites` is behavioural reference and conformance oracle only, permanently, never a code source;
+- maintain the `thesauros` / `atmis` `PersistenceBackend` adapters;
 - fix CI / lint / gate failures;
 - maintain the trait surface against consumer drift.
 
@@ -43,6 +43,6 @@ Every PR commit carries `Gate-Passed: <sha>+<iso-8601-timestamp>` (or the legacy
 |------|---------|-----------|
 | `kanon/projects/heurema/` | planning artifacts (STATE.md, ROADMAP.md, vision.md, design.md) | heurēma reads; updates happen there |
 | `kanon/crates/basanos/standards/` | universal standards | heurēma reads; never edits from here |
-| `aletheia/crates/krites/` | Phase 2 source of HNSW + BM25 code | heurēma adopts; aletheia owns the original |
+| `aletheia/crates/krites/` | Phase 2 behavioural reference + conformance oracle, permanently — never a code source (see `CLAUDE.md`'s Roadmap section) | heurēma reads; aletheia owns the original |
 
 Any change that touches the public API surface must also update kanon's `projects/heurema/STATE.md` and any consumer's pinned version.

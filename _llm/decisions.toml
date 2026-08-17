@@ -40,8 +40,32 @@ id = "heurema-persistence-pluggable"
 title = "Persistence-pluggable backend trait"
 status = "accepted"
 context = "Consumers want different storage substrates (fjall, in-memory, engine-owned)."
-decision = "PersistenceBackend stays a trait; Phase 3 ships sibling adapter crates (heurema-fjall, heurema-memory) under this workspace."
+decision = "PersistenceBackend stays a trait; thesauros and atmis implement it as sibling crates under this workspace."
 consequences = "Index implementations stay storage-agnostic; consumers pick adapters independently."
+
+[[decision]]
+id = "heurema-adapter-names-gnomon-not-owner-prefix"
+title = "Adapter crates named thesauros / atmis, not heurema-fjall / heurema-memory"
+status = "accepted"
+context = "Earlier planning prose in this repo (CLAUDE.md Roadmap, AGENTS.md, this file) named the two Phase 3 crates heurema-fjall and heurema-memory before checking them against NAMING.md, which forbids exactly this [fleet-repo]-[role] shape and lists aletheia-classify, harmonia-convert, and aletheia-memory-mcp as violations of it — not a case-by-case sibling-family carve-out, which is reserved for a shared THIRD sub-system prefix, not the repo's own name. kanon lint . --all confirmed both names trip NAMING/no-owner-prefix (high precision) directly."
+decision = "Named the durable adapter thesauros (θησαυρός, storehouse/treasury; LSJ also records a metaphorical sense of the soul as a repository of thoughts, which the name inherits for a repository of search indexes) and the ephemeral adapter atmis (ἀτμίς, vapor; rises and leaves no residue once its condition, a live process, ends). Both roots verified free via kanon name check and crates.io before adoption, and neither derives from heurema's own etymology (εὕρημα, a finding) so the pair does not read as sub-senses of the parent word."
+consequences = "Renamed before anything could consume the old names: crate directories, Cargo.toml package names, struct names (FjallBackend -> ThesaurosBackend, MemoryBackend -> AtmisBackend), and every doc reference in this repo (README.md, CLAUDE.md, AGENTS.md, this file, architecture.toml, current_state.toml). The dispatch brief that requested heurema-fjall / heurema-memory predates this check; a trait or a crate name with zero prior consumers is the cheapest possible moment to fix a naming mistake, and this repo's own NAMING.md source stops the mistake here rather than filing it as a future migration."
+
+[[decision]]
+id = "heurema-deny-toml-once-cell-unbanned"
+title = "deny.toml carries no once_cell ban, unlike its lazy_static sibling"
+status = "accepted"
+context = "thesauros's fjall dependency (crates/thesauros/Cargo.toml) pulls once_cell transitively through four different direct parents — dashmap, enum_dispatch, path-dedot, tempfile — none of them heurema code, none of them avoidable without forking fjall. deny.toml previously carried a hard [[bans.deny]] entry for once_cell (RUST.md's fleet-wide std::sync::LazyLock ban), which fails cargo deny on the whole resolved dependency tree, not just first-party imports. Verified via a real CI failure (gh run view --log-failed) before the fix, not guessed."
+decision = "Removed the once_cell [[bans.deny]] entry. kanon's own deny.toml, which also depends on fjall via archeion, carries no once_cell ban either. The fleet-wide RUST.md rule is enforced at the source-grep level instead (basanos RUST/banned-crates, crates/basanos/src/rules/rust_banned.rs:50), which greps heurema's own source and would still catch a first-party `use once_cell::` — that is the correct enforcement layer for a first-party-only rule; a transitive-dependency-wide cargo-deny ban is not."
+consequences = "If a future dependency bump changes which crate in the fjall tree pulls once_cell, or removes the dependency on it entirely, this decision does not need revisiting either way — the ban stays absent regardless, since the rule it enforces (no first-party once_cell import) is unaffected by what a third-party dependency does internally. Do not re-add the [[bans.deny]] entry without first checking whether fjall's tree still needs it; re-adding it blindly reintroduces this exact failure."
+
+[[decision]]
+id = "heurema-persistence-serde-bound"
+title = "PersistenceBackend save/load methods bound I on Serialize / DeserializeOwned"
+status = "accepted"
+context = "Phase 1 declared save_vector_index / load_vector_index / save_fts_index / load_fts_index generic over only I: VectorIndex (or I: FtsIndex). Neither VectorIndex nor FtsIndex exposes a constructor: no new, no Default. A generic load_* therefore could not build a value of a caller-chosen I under the original bound, so Ok was structurally unreachable from either load method — the two Phase 1 test fixtures (RecordingBackend, FailingBackend) both proved this obliquely by never once returning Ok. Verified with an isolated rustc probe (not the workspace gate) before writing the adapters: a non_exhaustive struct blocks external struct-literal construction (E0639), while a non_exhaustive enum with public-field variants does not — settling that the two Phase 1 fixtures' literal HeuremaError construction was already valid Rust and that PersistenceBackend's own generic-construction gap was the real blocker, not enum visibility."
+decision = "Bound I: VectorIndex + Serialize on the save methods and I: VectorIndex + DeserializeOwned on the load methods (FtsIndex mirrors both). The bound lives at the persistence boundary only; VectorIndex and FtsIndex themselves are unchanged. HnswConfig, VectorDistance, HnswIndex, FtsConfig, TokenizerConfig, and Bm25Index all gained Serialize + Deserialize derives so the Phase 1 stub types satisfy it."
+consequences = "This is a signature change to a trait heurema's own CLAUDE.md Boundaries section flags ask-first, not an addition beside the Phase 1 signature — a caller-chosen I that does not derive Serialize/Deserialize no longer satisfies PersistenceBackend. No external consumer existed to break: the trait shipped zero implementations before this decision. Both adapters and all persistence_contract.rs fixtures needed their where-clauses updated to match."
 
 [[decision]]
 id = "heurema-fleet-repo-conventions"
@@ -51,6 +75,13 @@ context = "heurema joins the Tier U public fleet repos and inherits the same rel
 decision = "Ship release-please + gate-attestation workflows, the license recorded in heurema-license-mpl, standards inherited from kanon/crates/basanos/standards/, and the _llm corpus on first commit."
 consequences = "Public-mirror readiness from day one; downstream consumers can pin a git tag and rely on the gate-attestation trailer."
 
+[[decision]]
+id = "heurema-phase-2-source-settled"
+title = "Phase 2 source: write-fresh, permanently — krites replaced, not relocated"
+status = "accepted"
+context = "Phase 2's source (write-fresh vs. extract-from-krites) was answered both ways across eight surfaces (heurema#21) because the answer had genuinely depended on a then-open condition: aletheia's krites clean-room rewrite (phase 05b, aletheia#5954) and its standalone-extraction gate (aletheia#6060 / ADR-007, gated on phase 05g). Phase 05g shipped in v0.35.0, closing that gate."
+decision = "HNSW and BM25 are written fresh in heurema, permanently. krites is replaced by its own clean-room rewrite, not relocated into heurema — extraction is not the live option on the far side of the gate, contrary to what the gate's existence implied while open. krites serves only as behavioural reference and its tests as a conformance oracle."
+consequences = "Every surface stating the Phase 2 source points at CLAUDE.md's Roadmap entry, which carries this ruling, rather than restating either side. No future re-litigation: the gate this decision used to track is closed, not just currently-closed."
 [[decision]]
 id = "heurema-license-mpl"
 title = "MPL-2.0, not AGPL-3.0-or-later"

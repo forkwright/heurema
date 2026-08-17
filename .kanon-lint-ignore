@@ -1,0 +1,10 @@
+# Format: RULE/name:path/glob # reason
+
+# WHY: cargo deny runs in the dedicated .github/workflows/security.yml
+# (EmbarkStudios/cargo-deny-action, check advisories licenses bans sources),
+# not in ci.yml -- the fleet SUPPLY-CHAIN.md pattern keeps dependency audit in
+# its own workflow (PR + daily schedule) rather than duplicating it inside the
+# build/test workflow. CI/no-deny-check only reads .github/workflows/ci.yml
+# and cannot see the sibling security.yml, so it false-fires on every repo
+# that follows this pattern. Rule fix tracked: forkwright/kanon#2975.
+CI/no-deny-check:.github/workflows/ci.yml

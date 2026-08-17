@@ -52,7 +52,7 @@ fn hnsw_stub_exposes_vector_index_contract() {
 }
 
 #[test]
-fn hnsw_stub_reports_dimension_mismatch_before_extraction() {
+fn hnsw_stub_reports_dimension_mismatch_before_implementation() {
     let mut index = HnswIndex::<u64>::new(HnswConfig::new(3));
 
     let error = match index.insert(7, &[1.0, 2.0]) {
@@ -87,7 +87,7 @@ fn assert_not_yet<T>(result: Result<T, HeuremaError>) {
         Err(HeuremaError::NotYetImplemented { feature, .. }) => {
             assert!(
                 feature.contains("Phase 2"),
-                "stub error should point callers at Phase 2 extraction"
+                "stub error should point callers at Phase 2"
             );
         }
         Ok(_) => panic!("expected NotYetImplemented, got Ok"),

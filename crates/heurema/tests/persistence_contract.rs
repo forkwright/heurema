@@ -55,7 +55,7 @@ impl RecordingBackend {
 impl PersistenceBackend for RecordingBackend {
     fn save_vector_index<I>(&self, name: &str, _idx: &I) -> Result<(), HeuremaError>
     where
-        I: VectorIndex,
+        I: VectorIndex + serde::Serialize,
     {
         self.saved.borrow_mut().insert(name.to_owned());
         Ok(())
@@ -63,14 +63,14 @@ impl PersistenceBackend for RecordingBackend {
 
     fn load_vector_index<I>(&self, name: &str) -> Result<I, HeuremaError>
     where
-        I: VectorIndex,
+        I: VectorIndex + serde::de::DeserializeOwned,
     {
         Err(Self::not_found(name))
     }
 
     fn save_fts_index<I>(&self, name: &str, _idx: &I) -> Result<(), HeuremaError>
     where
-        I: FtsIndex,
+        I: FtsIndex + serde::Serialize,
     {
         self.saved.borrow_mut().insert(name.to_owned());
         Ok(())
@@ -78,7 +78,7 @@ impl PersistenceBackend for RecordingBackend {
 
     fn load_fts_index<I>(&self, name: &str) -> Result<I, HeuremaError>
     where
-        I: FtsIndex,
+        I: FtsIndex + serde::de::DeserializeOwned,
     {
         Err(Self::not_found(name))
     }
@@ -99,28 +99,28 @@ impl FailingBackend {
 impl PersistenceBackend for FailingBackend {
     fn save_vector_index<I>(&self, _name: &str, _idx: &I) -> Result<(), HeuremaError>
     where
-        I: VectorIndex,
+        I: VectorIndex + serde::Serialize,
     {
         Err(Self::storage_failure())
     }
 
     fn load_vector_index<I>(&self, _name: &str) -> Result<I, HeuremaError>
     where
-        I: VectorIndex,
+        I: VectorIndex + serde::de::DeserializeOwned,
     {
         Err(Self::storage_failure())
     }
 
     fn save_fts_index<I>(&self, _name: &str, _idx: &I) -> Result<(), HeuremaError>
     where
-        I: FtsIndex,
+        I: FtsIndex + serde::Serialize,
     {
         Err(Self::storage_failure())
     }
 
     fn load_fts_index<I>(&self, _name: &str) -> Result<I, HeuremaError>
     where
-        I: FtsIndex,
+        I: FtsIndex + serde::de::DeserializeOwned,
     {
         Err(Self::storage_failure())
     }

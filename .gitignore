@@ -2,6 +2,10 @@
 **/*.rs.bk
 Cargo.lock.bak
 
+# kanon lint's local substrate cache (fleet-wide pattern; see aletheia,
+# kanon, theatron, logismos, hamma, thumos, epitelesis .gitignore)
+.kanon/
+
 # Editor / OS noise
 .DS_Store
 .vscode/
