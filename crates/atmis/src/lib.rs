@@ -42,14 +42,14 @@ impl AtmisBackend {
     fn not_found(name: &str) -> HeuremaError {
         HeuremaError::IndexNotFound {
             name: name.to_owned(),
-            location: snafu::Location::default(),
+            location: std::panic::Location::caller(),
         }
     }
 
     fn codec_error(source: serde_json::Error) -> HeuremaError {
         HeuremaError::Persistence {
             source: PersistenceSource::new(source),
-            location: snafu::Location::default(),
+            location: std::panic::Location::caller(),
         }
     }
 
