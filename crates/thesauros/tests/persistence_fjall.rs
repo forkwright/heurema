@@ -1,8 +1,8 @@
 //! Integration tests for [`thesauros::ThesaurosBackend`] against the
 //! `heurema::PersistenceBackend` contract.
 //!
-//! WHY every round trip here drops the backend and reopens the keyspace at
-//! the same path before loading: `fjall::Keyspace::open` auto-recovery
+//! WHY every round trip here drops the backend and reopens the database at
+//! the same path before loading: `fjall::Database::open` auto-recovery
 //! deletes segments absent from the levels manifest, so the only way to
 //! prove data survived is to actually close the process's handle and come
 //! back through the disk, exactly as a crash-restart would. An in-process
@@ -47,7 +47,7 @@ fn fts_config() -> FtsConfig {
 fn io_error(source: std::io::Error) -> HeuremaError {
     HeuremaError::Persistence {
         source: PersistenceSource::new(source),
-        location: snafu::Location::default(),
+        location: std::panic::Location::caller(),
     }
 }
 
@@ -58,7 +58,7 @@ fn vector_index_survives_close_and_reopen() -> Result<(), HeuremaError> {
     {
         let backend = ThesaurosBackend::open(dir.path())?;
         backend.save_vector_index("embeddings", &HnswIndex::<u64>::new(vector_config()))?;
-    } // WHY: the backend, its Keyspace, and both PartitionHandles drop here —
+    } // WHY: the backend, its Database, and both Keyspaces drop here —
     // the only handle onto this fjall database goes away before reopening.
 
     let reopened = ThesaurosBackend::open(dir.path())?;

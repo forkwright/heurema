@@ -2,18 +2,18 @@
 //! [`PersistenceBackend`] adapter for heurema indexes.
 //!
 //! Every save encodes the index through `serde_json`, writes it to a fjall
-//! partition, then fsyncs the keyspace journal
+//! keyspace, then fsyncs the database journal
 //! (`fjall::PersistMode::SyncAll`) before returning `Ok`. A save that
 //! returns `Ok` is durable on disk at that point, not merely buffered. That
 //! is this crate's entire reason to exist over `atmis`, and the property
-//! its test suite proves by closing and reopening the keyspace rather than
+//! its test suite proves by closing and reopening the database rather than
 //! trusting an in-process value.
 
 #![deny(missing_docs)]
 
 use std::path::Path;
 
-use fjall::PartitionCreateOptions;
+use fjall::KeyspaceCreateOptions;
 use heurema::{FtsIndex, HeuremaError, PersistenceBackend, PersistenceSource, VectorIndex};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -22,36 +22,38 @@ const VECTOR_PARTITION: &str = "vector_indexes";
 const FTS_PARTITION: &str = "fts_indexes";
 
 /// fjall-backed [`PersistenceBackend`]. Vector-index and FTS-index
-/// snapshots live in separate fjall partitions so the two name spaces the
+/// snapshots live in separate fjall keyspaces so the two name spaces the
 /// trait itself keeps independent stay independent on disk.
 pub struct ThesaurosBackend {
-    keyspace: fjall::Keyspace,
-    vector_indexes: fjall::PartitionHandle,
-    fts_indexes: fjall::PartitionHandle,
+    db: fjall::Database,
+    vector_indexes: fjall::Keyspace,
+    fts_indexes: fjall::Keyspace,
 }
 
 impl ThesaurosBackend {
-    /// Open (or create) a keyspace at `path`.
+    /// Open (or create) a database at `path`.
     ///
-    /// WARNING: fjall keyspaces are single-process — opening the same
+    /// WARNING: fjall databases are single-process — opening the same
     /// `path` from two live backends at once is a fleet-wide known hazard
     /// (see kanon's `archeion` crate CLAUDE.md), not specific to this
     /// adapter. The caller owns process-level exclusivity over `path`.
     ///
     /// # Errors
     ///
-    /// Returns [`HeuremaError::Persistence`] if the keyspace or either
-    /// partition fails to open.
+    /// Returns [`HeuremaError::Persistence`] if the database or either
+    /// keyspace fails to open.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, HeuremaError> {
-        let keyspace = fjall::Config::new(path).open().map_err(Self::fjall_error)?;
-        let vector_indexes = keyspace
-            .open_partition(VECTOR_PARTITION, PartitionCreateOptions::default())
+        let db = fjall::Database::builder(path)
+            .open()
             .map_err(Self::fjall_error)?;
-        let fts_indexes = keyspace
-            .open_partition(FTS_PARTITION, PartitionCreateOptions::default())
+        let vector_indexes = db
+            .keyspace(VECTOR_PARTITION, KeyspaceCreateOptions::default)
+            .map_err(Self::fjall_error)?;
+        let fts_indexes = db
+            .keyspace(FTS_PARTITION, KeyspaceCreateOptions::default)
             .map_err(Self::fjall_error)?;
         Ok(Self {
-            keyspace,
+            db,
             vector_indexes,
             fts_indexes,
         })
@@ -60,21 +62,21 @@ impl ThesaurosBackend {
     fn not_found(name: &str) -> HeuremaError {
         HeuremaError::IndexNotFound {
             name: name.to_owned(),
-            location: snafu::Location::default(),
+            location: std::panic::Location::caller(),
         }
     }
 
     fn fjall_error(source: fjall::Error) -> HeuremaError {
         HeuremaError::Persistence {
             source: PersistenceSource::new(source),
-            location: snafu::Location::default(),
+            location: std::panic::Location::caller(),
         }
     }
 
     fn codec_error(source: serde_json::Error) -> HeuremaError {
         HeuremaError::Persistence {
             source: PersistenceSource::new(source),
-            location: snafu::Location::default(),
+            location: std::panic::Location::caller(),
         }
     }
 
@@ -85,7 +87,7 @@ impl ThesaurosBackend {
     // `PersistMode` later; Phase 3 keeps it unconditional because no
     // caller has asked for the weaker mode yet.
     fn sync(&self) -> Result<(), HeuremaError> {
-        self.keyspace
+        self.db
             .persist(fjall::PersistMode::SyncAll)
             .map_err(Self::fjall_error)
     }

@@ -47,7 +47,7 @@ impl RecordingBackend {
     fn not_found(name: &str) -> HeuremaError {
         HeuremaError::IndexNotFound {
             name: name.to_owned(),
-            location: snafu::Location::default(),
+            location: std::panic::Location::caller(),
         }
     }
 }
@@ -91,7 +91,7 @@ impl FailingBackend {
     fn storage_failure() -> HeuremaError {
         HeuremaError::Persistence {
             source: PersistenceSource::new(MidError::default()),
-            location: snafu::Location::default(),
+            location: std::panic::Location::caller(),
         }
     }
 }
