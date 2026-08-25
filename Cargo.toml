@@ -41,7 +41,7 @@ snafu = "0.8"
 # fleet-wide.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-fjall = "2"
+fjall = "3"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
