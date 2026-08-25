@@ -31,7 +31,7 @@ atmis = { version = "0.2.0", path = "crates/atmis" }
 # WHY: snafu is the fleet-wide error library per kanon RUST.md. Pinned at the
 # workspace root so the single heurema crate inherits via `workspace = true`,
 # matching the inheritance pattern adapter sub-crates will use later.
-snafu = "0.8"
+snafu = "0.9"
 
 # WHY: heurema's PersistenceBackend bound (crates/heurema/src/persistence.rs)
 # needs Serialize on save and DeserializeOwned on load, so heurema itself
