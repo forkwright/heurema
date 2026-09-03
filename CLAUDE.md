@@ -28,8 +28,9 @@ Cargo.toml           # workspace root
 crates/heurema/      # trait + RRF crate, workspace member
   src/               # lib.rs, error.rs, fts.rs (+ fts/stub.rs),
                      # hnsw.rs (+ hnsw/stub.rs), persistence.rs, rrf.rs
-  tests/             # api_smoke.rs, index_rrf_composition.rs,
-                     # persistence_contract.rs, rrf_correctness.rs
+  tests/             # api_smoke.rs, index_rrf_composition.rs, oracle/,
+                     # persistence_contract.rs, persistence_schema_closed.rs,
+                     # rrf_correctness.rs
 crates/atmis/        # in-memory PersistenceBackend adapter (ἀτμίς, vapor)
   src/lib.rs         # AtmisBackend
   tests/             # persistence_memory.rs
