@@ -40,13 +40,19 @@ fn dimension_mismatch_is_rejected_before_state_change() {
                 assert_eq!(expected, 4, "expected dimension comes from the config");
                 assert_eq!(actual, wrong, "actual dimension comes from the input");
             }
-            Ok(()) => panic!("insert of a {wrong}-dimensional vector into a 4-dimensional index must fail"),
-            Err(other) => panic!("the dimension check precedes every other failure mode, got {other:?}"),
+            Ok(()) => panic!(
+                "insert of a {wrong}-dimensional vector into a 4-dimensional index must fail"
+            ),
+            Err(other) => {
+                panic!("the dimension check precedes every other failure mode, got {other:?}")
+            }
         }
         match index.query(&vector, 1) {
             Err(HeuremaError::DimensionMismatch { .. }) => {}
             Ok(_) => panic!("query with a {wrong}-dimensional vector must fail"),
-            Err(other) => panic!("the dimension check precedes every other failure mode, got {other:?}"),
+            Err(other) => {
+                panic!("the dimension check precedes every other failure mode, got {other:?}")
+            }
         }
         assert!(
             index.is_empty(),
