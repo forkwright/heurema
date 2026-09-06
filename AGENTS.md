@@ -8,7 +8,7 @@ tightens: phase-specific dispatch prompts may override defaults with justificati
 
 ## Purpose
 
-heurēma is a fleet substrate providing HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion primitives: the `heurema` trait + RRF crate plus its `thesauros` (durable) and `atmis` (in-memory) `PersistenceBackend` sibling crates. Consumed externally by fleet query engines (`pinax` for SQL, `mneme` for Datalog) and by aletheia's `krites` memory stack (per ADR-003: aletheia's memory stack stays internal but is free to adopt heurēma when it chooses).
+heurēma is a fleet substrate providing HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion primitives: the `heurema` trait + RRF crate plus its `thesauros` (durable) and `atmis` (in-memory) `PersistenceBackend` sibling crates. Consumed externally by `pinax` for SQL and by `mneme`, the memory-*policy* layer (admission, retention, lifecycle rules) built over heurēma's own Datalog engine, `akolouthia` — mneme is not a second engine (see README.md's Non-goals) — and by aletheia's `krites` memory stack (per ADR-003: aletheia's memory stack stays internal but is free to adopt heurēma when it chooses).
 
 Agents working here:
 
