@@ -29,7 +29,7 @@ No system dependencies. Pure-Rust crate. Headless CI compatible.
 
 ## Standards
 
-Inherited from `~/dev/kanon/crates/basanos/standards/`. Key documents: `PHILOSOPHY.md`, `GNOMON.md`, `COHERENCE.md`, `RUST.md`, `TESTING.md`, `FLEET-REPO-SETUP.md`.
+Inherited from `crates/basanos/standards/` in `forkwright/kanon`. Key documents: `PHILOSOPHY.md`, `GNOMON.md`, `COHERENCE.md`, `RUST.md`, `TESTING.md`, `FLEET-REPO-SETUP.md`.
 
 Local CLAUDE.md narrows the standards to repo-specific patterns; read it before editing.
 
