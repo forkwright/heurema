@@ -1,6 +1,6 @@
 <!--
 scope: heurema repo conventions (fleet substrate: the heurema trait crate plus its persistence-adapter sibling crates)
-defers_to: ~/.claude/CLAUDE.md for operator principles; ~/dev/kanon/crates/basanos/standards/STANDARDS.md for fleet-wide standards
+defers_to: ~/.claude/CLAUDE.md for operator principles; `crates/basanos/standards/STANDARDS.md` in `forkwright/kanon` for fleet-wide standards
 tightens: per-crate CLAUDE.md under crates/heurema/ may narrow conventions
 -->
 
@@ -10,7 +10,7 @@ Shared search-index primitives for the forkwright fleet. One implementation, one
 
 ## Standards
 
-Universal fleet standards live in `~/dev/kanon/crates/basanos/standards/`. This repo inherits — it does not restate.
+Universal fleet standards live in `crates/basanos/standards/` in `forkwright/kanon`. This repo inherits — it does not restate.
 
 Particularly relevant:
 

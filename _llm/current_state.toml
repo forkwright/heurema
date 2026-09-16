@@ -20,7 +20,7 @@ item = "atmis and thesauros implement PersistenceBackend; the trait's save/load 
 
 [[recent]]
 date = "2026-05-28"
-item = "Extracted from kanon/crates/heurema to forkwright/heurema per kanon planning D-067 (Tier B EXTRACT-NOW verdict) + metis-ops #52."
+item = "Extracted from kanon/crates/heurema to forkwright/heurema per kanon planning D-067 (Tier B EXTRACT-NOW verdict)."
 
 [[recent]]
 date = "2026-05-04"
