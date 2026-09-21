@@ -18,7 +18,10 @@
 use std::collections::HashMap;
 use std::sync::{PoisonError, RwLock};
 
-use heurema::{FtsIndex, HeuremaError, PersistenceBackend, PersistenceSource, VectorIndex};
+use heurema::{
+    FtsIndex, HeuremaError, PersistenceBackend, PersistenceSource, SnapshotEnvelope,
+    SnapshotFamily, VectorIndex,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -75,7 +78,8 @@ impl PersistenceBackend for AtmisBackend {
     where
         I: VectorIndex + Serialize,
     {
-        let bytes = serde_json::to_vec(idx).map_err(Self::codec_error)?;
+        let bytes = serde_json::to_vec(&SnapshotEnvelope::new(SnapshotFamily::Vector, idx))
+            .map_err(Self::codec_error)?;
         Self::write(&self.vector_snapshots).insert(name.to_owned(), bytes);
         Ok(())
     }
@@ -86,14 +90,17 @@ impl PersistenceBackend for AtmisBackend {
     {
         let snapshots = Self::read(&self.vector_snapshots);
         let bytes = snapshots.get(name).ok_or_else(|| Self::not_found(name))?;
-        serde_json::from_slice(bytes).map_err(Self::codec_error)
+        serde_json::from_slice::<SnapshotEnvelope<I>>(bytes)
+            .map_err(Self::codec_error)?
+            .into_payload(SnapshotFamily::Vector)
     }
 
     fn save_fts_index<I>(&self, name: &str, idx: &I) -> Result<(), HeuremaError>
     where
         I: FtsIndex + Serialize,
     {
-        let bytes = serde_json::to_vec(idx).map_err(Self::codec_error)?;
+        let bytes = serde_json::to_vec(&SnapshotEnvelope::new(SnapshotFamily::Fts, idx))
+            .map_err(Self::codec_error)?;
         Self::write(&self.fts_snapshots).insert(name.to_owned(), bytes);
         Ok(())
     }
@@ -104,6 +111,8 @@ impl PersistenceBackend for AtmisBackend {
     {
         let snapshots = Self::read(&self.fts_snapshots);
         let bytes = snapshots.get(name).ok_or_else(|| Self::not_found(name))?;
-        serde_json::from_slice(bytes).map_err(Self::codec_error)
+        serde_json::from_slice::<SnapshotEnvelope<I>>(bytes)
+            .map_err(Self::codec_error)?
+            .into_payload(SnapshotFamily::Fts)
     }
 }

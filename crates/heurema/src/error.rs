@@ -96,6 +96,17 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
+    /// WHY: persisted index bytes must name a supported snapshot format and
+    /// index family before an adapter decodes engine state.
+    #[snafu(display("unsupported index snapshot: {reason}"))]
+    SnapshotFormat {
+        /// Validation failure.
+        reason: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
     /// WHY: Rank fusion must reject a malformed dampening constant with a
     /// typed error instead of panicking inside library code.
     #[snafu(display("invalid RRF k_constant: {k_constant} (must be finite and positive)"))]
