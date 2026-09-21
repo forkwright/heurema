@@ -40,6 +40,12 @@ commit:
    as unit tests beside the engine in `src/hnsw/` / `src/fts/`. The oracle
    deliberately asserts only trait-observable behaviour; this clause is what
    keeps "parity" from meaning "the trait surface alone was checked".
+   Query traversal has a documented internal expansion budget derived from
+   `max(k, 8m)`, and construction uses `max(ef_construction, m)`. Those are
+   explicit bounds on expanded candidates and upper-layer greedy steps, with
+   separate adversarial-cycle tests and the unchanged recall floor as the
+   acceptance pair. They are internal work budgets, not a claim that the
+   standard HNSW `ef` retained-beam semantics are unchanged.
 
 During Phase 2 development the work-in-progress check is
 `cargo test -p heurema --test oracle -- --include-ignored`.

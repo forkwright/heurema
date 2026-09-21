@@ -51,6 +51,15 @@ pub struct HnswIndex<Id> {
     #[cfg(test)]
     #[serde(skip)]
     distance_evaluations: Cell<usize>,
+    #[cfg(test)]
+    #[serde(skip)]
+    entry_reselection_nodes: Cell<usize>,
+    #[cfg(test)]
+    #[serde(skip)]
+    greedy_steps: Cell<usize>,
+    #[cfg(test)]
+    #[serde(skip)]
+    search_expansions: Cell<usize>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +76,10 @@ struct RawHnswIndex<Id> {
 impl<Id: Ord + Clone> TryFrom<RawHnswIndex<Id>> for HnswIndex<Id> {
     type Error = &'static str;
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one closed snapshot boundary validates mutually dependent graph invariants"
+    )]
     fn try_from(raw: RawHnswIndex<Id>) -> Result<Self, Self::Error> {
         validate_config(&raw.config)?;
         if raw.level_state == 0 {
@@ -165,6 +178,12 @@ impl<Id: Ord + Clone> TryFrom<RawHnswIndex<Id>> for HnswIndex<Id> {
             level_state: raw.level_state,
             #[cfg(test)]
             distance_evaluations: Cell::new(0),
+            #[cfg(test)]
+            entry_reselection_nodes: Cell::new(0),
+            #[cfg(test)]
+            greedy_steps: Cell::new(0),
+            #[cfg(test)]
+            search_expansions: Cell::new(0),
         })
     }
 }
@@ -184,6 +203,12 @@ impl<Id> HnswIndex<Id> {
             level_state: 0x9e37_79b9_7f4a_7c15,
             #[cfg(test)]
             distance_evaluations: Cell::new(0),
+            #[cfg(test)]
+            entry_reselection_nodes: Cell::new(0),
+            #[cfg(test)]
+            greedy_steps: Cell::new(0),
+            #[cfg(test)]
+            search_expansions: Cell::new(0),
         }
     }
 
@@ -289,8 +314,17 @@ where
         level
     }
 
-    fn greedy_at_level(&self, vector: &[f32], mut current: Id, level: usize) -> Id {
-        loop {
+    fn greedy_at_level(
+        &self,
+        vector: &[f32],
+        mut current: Id,
+        level: usize,
+        expansion_budget: usize,
+    ) -> Id {
+        for _ in 0..expansion_budget {
+            #[cfg(test)]
+            self.greedy_steps
+                .set(self.greedy_steps.get().saturating_add(1));
             let Some(node) = self.nodes.get(&current) else {
                 return current;
             };
@@ -318,19 +352,30 @@ where
             }
             current = next;
         }
+        current
     }
 
-    fn search_layer(&self, vector: &[f32], entries: Vec<Id>, level: usize, ef: usize) -> Vec<Id> {
+    fn search_layer(
+        &self,
+        vector: &[f32],
+        entries: Vec<Id>,
+        level: usize,
+        retained: usize,
+        expansion_budget: usize,
+    ) -> Vec<Id> {
         let mut visited = BTreeSet::new();
         let mut frontier = entries;
         let mut results = Vec::new();
-        while !frontier.is_empty() {
+        while !frontier.is_empty() && visited.len() < expansion_budget {
             frontier.sort_by(|left, right| self.compare_ids_by_distance(vector, left, right));
             let current = frontier.remove(0);
             if !visited.insert(current.clone()) {
                 continue;
             }
-            if results.len() >= ef
+            #[cfg(test)]
+            self.search_expansions
+                .set(self.search_expansions.get().saturating_add(1));
+            if results.len() >= retained
                 && let Some(worst) = results.last()
                 && self
                     .compare_ids_by_distance(vector, &current, worst)
@@ -340,7 +385,7 @@ where
             }
             results.push(current.clone());
             results.sort_by(|left, right| self.compare_ids_by_distance(vector, left, right));
-            if results.len() > ef {
+            if results.len() > retained {
                 results.pop();
             }
             if let Some(node) = self.nodes.get(&current) {
@@ -405,6 +450,12 @@ where
     }
 
     fn reselect_entry(&mut self) {
+        #[cfg(test)]
+        self.entry_reselection_nodes.set(
+            self.entry_reselection_nodes
+                .get()
+                .saturating_add(self.nodes.len()),
+        );
         self.max_level = self
             .nodes
             .values()
@@ -412,6 +463,17 @@ where
             .max()
             .unwrap_or(0);
         self.entry_point = select_entry(&self.nodes);
+    }
+
+    fn consider_new_entry(&mut self, id: &Id, level: usize) {
+        if self
+            .entry_point
+            .as_ref()
+            .is_none_or(|entry| level > self.max_level || (level == self.max_level && id < entry))
+        {
+            self.max_level = level;
+            self.entry_point = Some(id.clone());
+        }
     }
 
     fn connect_backbone(&mut self, left: &Id, right: &Id) {
@@ -494,7 +556,15 @@ where
         if let [left, right] = anchors.as_slice() {
             self.connect_backbone(left, right);
         }
-        self.reselect_entry();
+        if self.nodes.is_empty() {
+            self.max_level = 0;
+            self.entry_point = None;
+        } else if self.entry_point.as_ref() == Some(id) {
+            // Removing the canonical highest-level entry is the only mutation
+            // that requires a full level selection; ordinary insertions and
+            // non-entry removals retain their known entry incrementally.
+            self.reselect_entry();
+        }
     }
 }
 
@@ -521,33 +591,37 @@ where
             },
         );
         let Some(mut entry) = surviving_entry else {
-            self.reselect_entry();
+            self.max_level = level;
+            self.entry_point = Some(id);
             return Ok(());
         };
         // Normal links are degree-pruned HNSW shortcuts. The separate cycle
         // edge is never pruned and splices locally, preserving a bounded base
         // traversal through insertion, replacement, and removal.
         self.splice_backbone(&id, &entry);
+        let construction_budget = self
+            .config
+            .ef_construction
+            .max(self.config.m_neighbours)
+            .max(1);
         for current_level in ((level + 1)..=self.max_level).rev() {
-            entry = self.greedy_at_level(vector, entry, current_level);
+            entry = self.greedy_at_level(vector, entry, current_level, construction_budget);
         }
         for current_level in (0..=level.min(self.max_level)).rev() {
             let candidates = self.search_layer(
                 vector,
                 vec![entry.clone()],
                 current_level,
-                self.config
-                    .ef_construction
-                    .max(self.config.m_neighbours)
-                    .max(1),
+                construction_budget,
+                construction_budget,
             );
             let count = self.degree_limit(current_level);
             for candidate in candidates.into_iter().take(count) {
                 self.link(&id, &candidate, current_level);
             }
-            entry = self.greedy_at_level(vector, entry, current_level);
+            entry = self.greedy_at_level(vector, entry, current_level, construction_budget);
         }
-        self.reselect_entry();
+        self.consider_new_entry(&id, level);
         Ok(())
     }
 
@@ -559,13 +633,17 @@ where
         let Some(mut entry) = self.entry_point.clone() else {
             return Ok(Vec::new());
         };
+        let expansion_budget = self.query_beam(k);
         for level in (1..=self.max_level).rev() {
-            entry = self.greedy_at_level(vector, entry, level);
+            entry = self.greedy_at_level(vector, entry, level, expansion_budget);
         }
-        let candidates = self.search_layer(vector, vec![entry], 0, self.query_beam(k));
-        candidates
+        let candidates =
+            self.search_layer(vector, vec![entry], 0, expansion_budget, expansion_budget);
+        // Convert and sort the full bounded candidate pool before applying k.
+        // Distinct f64 distances can round to one f32; the trait requires
+        // those public ties to use ascending IDs, including the k boundary.
+        let mut results: Vec<(Id, f32)> = candidates
             .into_iter()
-            .take(k)
             .filter_map(|id| {
                 self.node_distance(vector, &id)
                     .map(|distance| (id, distance))
@@ -581,7 +659,14 @@ where
                     .build())
                 }
             })
-            .collect()
+            .collect::<Result<_, HeuremaError>>()?;
+        results.sort_by(|(left_id, left_score), (right_id, right_score)| {
+            left_score
+                .total_cmp(right_score)
+                .then_with(|| left_id.cmp(right_id))
+        });
+        results.truncate(k);
+        Ok(results)
     }
 
     fn remove(&mut self, id: &Self::Id) -> Result<(), HeuremaError> {
@@ -599,13 +684,14 @@ where
     Id: Ord + Hash + Clone,
 {
     // `ef_construction` controls insertion only. The trait has no query-ef
-    // parameter, so search derives a stable bounded beam from k and the
-    // graph degree instead of silently reusing construction policy.
+    // parameter, so query derives a stable internal expansion budget from k
+    // and graph degree instead of silently reusing construction policy.
     fn query_beam(&self, k: usize) -> usize {
         // The public configuration deliberately exposes no ef-search knob.
-        // Eight adjacency widths retains a bounded graph walk while giving
-        // the default M=16 graph enough frontier to meet the pinned recall
-        // fixture without borrowing `ef_construction` as query policy.
+        // Eight adjacency widths bounds actual expansion work while giving
+        // the default M=16 graph enough exploration for the pinned recall
+        // fixture. This is an internal work budget, not standard ef's
+        // retained-beam semantics under another name.
         k.max(self.config.m_neighbours.saturating_mul(8)).max(1)
     }
 
@@ -617,6 +703,27 @@ where
     #[cfg(test)]
     fn distance_evaluations(&self) -> usize {
         self.distance_evaluations.get()
+    }
+
+    #[cfg(test)]
+    fn reset_entry_reselection_nodes(&self) {
+        self.entry_reselection_nodes.set(0);
+    }
+
+    #[cfg(test)]
+    fn entry_reselection_nodes(&self) -> usize {
+        self.entry_reselection_nodes.get()
+    }
+
+    #[cfg(test)]
+    fn reset_traversal_counts(&self) {
+        self.greedy_steps.set(0);
+        self.search_expansions.set(0);
+    }
+
+    #[cfg(test)]
+    fn traversal_counts(&self) -> (usize, usize) {
+        (self.greedy_steps.get(), self.search_expansions.get())
     }
 }
 
@@ -852,6 +959,78 @@ mod tests {
     }
 
     #[test]
+    fn insertion_updates_entry_incrementally_and_only_entry_removal_reselects() {
+        let mut index = HnswIndex::<u64>::new(HnswConfig::new(4));
+        for id in 0..256_u64 {
+            index.insert(id, &fixture_vector(id)).expect("valid insert");
+        }
+        assert_eq!(
+            index.entry_reselection_nodes(),
+            0,
+            "insertion must not rescan all graph nodes to choose an entry"
+        );
+        let entry = index.entry_point.expect("non-empty graph");
+        let non_entry = (0..256_u64)
+            .find(|id| *id != entry)
+            .expect("graph has another node");
+        index.remove(&non_entry).expect("non-entry removal");
+        assert_eq!(
+            index.entry_reselection_nodes(),
+            0,
+            "removing a non-entry must retain the known canonical entry"
+        );
+        index.reset_entry_reselection_nodes();
+        index.remove(&entry).expect("entry removal");
+        assert_eq!(
+            index.entry_reselection_nodes(),
+            254,
+            "only current-entry removal needs one exact replacement selection"
+        );
+        assert_base_reachable(&index);
+    }
+
+    #[test]
+    fn traversal_budget_bounds_an_empty_normal_link_cycle_and_upper_chain() {
+        let mut config = HnswConfig::new(2);
+        config.m_neighbours = 2;
+        let mut index = HnswIndex::<u64>::new(config);
+        const COUNT: u64 = 128;
+        for id in 0..COUNT {
+            index.nodes.insert(
+                id,
+                Node {
+                    vector: vec![(COUNT - id) as f32, 0.0],
+                    level: 1,
+                    neighbours: vec![BTreeSet::new(), BTreeSet::new()],
+                    backbone: BTreeSet::new(),
+                },
+            );
+        }
+        for id in 0..COUNT {
+            index.connect_backbone(&id, &((id + 1) % COUNT));
+        }
+        for id in 0..(COUNT - 1) {
+            index.nodes.get_mut(&id).expect("node").neighbours[1].insert(id + 1);
+            index.nodes.get_mut(&(id + 1)).expect("node").neighbours[1].insert(id);
+        }
+        index.entry_point = Some(0);
+        index.max_level = 1;
+        let budget = index.query_beam(4);
+        index.reset_traversal_counts();
+        let results = index.query(&[0.0, 0.0], 4).expect("bounded query");
+        let (greedy_steps, search_expansions) = index.traversal_counts();
+        assert_eq!(results.len(), 4);
+        assert!(
+            greedy_steps <= budget * index.max_level,
+            "upper-layer descent must obey its per-level expansion budget"
+        );
+        assert!(
+            search_expansions <= budget,
+            "the empty-normal-link cycle must not force linear base expansion"
+        );
+    }
+
+    #[test]
     fn invalid_vectors_and_snapshots_are_rejected_before_use() {
         let mut index = HnswIndex::<u64>::new(HnswConfig::new(2));
         assert!(matches!(
@@ -896,6 +1075,25 @@ mod tests {
             .query(&[f32::MAX, f32::MAX], 2)
             .expect("f64 cosine arithmetic remains finite");
         assert!(scores.iter().all(|(_, score)| score.is_finite()));
+    }
+
+    #[test]
+    fn f32_score_collapse_uses_public_score_ties_not_internal_distance_order() {
+        let mut index = HnswIndex::<u64>::new(HnswConfig::new(2));
+        index.insert(9, &[100_000.0, 0.0]).expect("finite vector");
+        index.insert(2, &[100_000.0, 1.0]).expect("finite vector");
+        let results = index.query(&[0.0, 0.0], 2).expect("query");
+        assert_eq!(results[0].1.to_bits(), results[1].1.to_bits());
+        assert_eq!(
+            results.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![2, 9],
+            "equal public f32 scores use ascending IDs across the candidate pool"
+        );
+        assert_eq!(
+            index.query(&[0.0, 0.0], 1).expect("query"),
+            results[..1],
+            "the public f32 tie ordering makes k=1 a prefix of k=2"
+        );
     }
 
     #[test]

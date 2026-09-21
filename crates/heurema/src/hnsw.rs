@@ -34,10 +34,12 @@ pub enum VectorDistance {
 /// recall, and storage shape depend on them.
 ///
 /// WHY `Serialize` + `Deserialize`: see [`VectorDistance`]. `new` fills
-/// defaults for the unset fields but validates nothing, so every field
-/// combination deserializes to a valid value; this is a pure data-transfer
-/// type, not a validated newtype, and the plain derive is the correct form
-/// per `RUST.md` § Serde validation. `deny_unknown_fields` still applies —
+/// defaults for the unset fields but validates nothing. The DTO therefore
+/// deserializes structurally valid field combinations, while `HnswIndex`
+/// validates non-zero dimensions, `m_neighbours`, and `ef_construction` at
+/// its mutation and snapshot boundary. It is not a validated newtype, and
+/// the plain derive is the correct form per `RUST.md` § Serde validation.
+/// `deny_unknown_fields` still applies —
 /// bytes decoding as a different concrete config shape under a shared
 /// `PersistenceBackend` snapshot name is a real failure mode
 /// (`crates/thesauros/tests/persistence_fjall.rs` exercises it), and a
