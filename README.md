@@ -2,7 +2,7 @@
 
 *εὕρημα - a finding, a discovery. Root of "eureka." Search indices are the means by which a system finds what it didn't know it was holding.*
 
-A reservation for the fleet's shared vector (HNSW), full-text (BM25), and rank-fusion search primitives, plus a persistence-adapter substrate that is fully working today. HNSW and BM25 stay a committed trait surface pending a fresh implementation.
+Shared full-text (BM25), rank-fusion, and persistence-adapter primitives for the fleet, with HNSW remaining a committed trait surface pending its fresh graph implementation.
 
 ## What's real
 
@@ -25,10 +25,7 @@ coinages instead).
 
 ## What's a stub
 
-`HnswIndex` (`src/hnsw/stub.rs`) and `Bm25Index` (`src/fts/stub.rs`) are concrete types that satisfy
-the `VectorIndex` / `FtsIndex` trait bounds so downstream code compiles, but every `insert` / `query` /
-`remove` returns `HeuremaError::NotYetImplemented`, and `len()` returns a field that is never
-incremented, so there is no index behind either type yet.
+`HnswIndex` (`src/hnsw/stub.rs`) remains a concrete type that satisfies `VectorIndex` while its fresh graph implementation is pending. Its mutation and query methods return `HeuremaError::NotYetImplemented`. `Bm25Index` is a real, in-memory BM25 engine for `FtsConfig::simple()`; named tokenizer/filter pipelines remain explicitly unsupported until their semantics are implemented.
 
 This is deliberate, not drift: the trait surface *is* the design. Committing the API now lets `pinax`
 and `mneme` build against the shape before the engines exist.
@@ -38,7 +35,7 @@ but that code is vendored CozoDB under MPL-2.0, so moving it would relocate a pr
 resolve one. `krites` instead is a behavioural reference, and its tests are a conformance oracle: the
 same opportunity to fix what the vendored implementation got wrong.
 
-Nothing here should be read as "heurēma provides HNSW/BM25 search" until those implementations land.
+Heurēma provides BM25 full-text search for the Simple pipeline. HNSW remains unavailable until its graph implementation lands.
 
 ## API surface
 
@@ -54,7 +51,7 @@ use thesauros::ThesaurosBackend;
 ```
 
 - `VectorIndex` - insert / query / remove for ID-keyed vectors, plus `len` / `is_empty`. Trait is real; `HnswIndex` is a stub.
-- `FtsIndex` - insert / query / remove for ID-keyed documents, with BM25-style scores. Trait is real; `Bm25Index` is a stub.
+- `FtsIndex` - insert / query / remove for ID-keyed documents, with BM25-style scores. `Bm25Index` implements the Simple pipeline.
 - `PersistenceBackend` - save / load named vector and FTS indexes; backend-agnostic. Trait is real; `atmis`'s `AtmisBackend` and `thesauros`'s `ThesaurosBackend` both implement it.
 - `rrf` / `rrf_with_default` - reciprocal-rank fusion with the paper-standard `k = 60`. Implemented and tested.
 

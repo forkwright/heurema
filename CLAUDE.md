@@ -26,7 +26,7 @@ Particularly relevant:
 ```
 Cargo.toml           # workspace root
 crates/heurema/      # trait + RRF crate, workspace member
-  src/               # lib.rs, error.rs, fts.rs (+ fts/stub.rs),
+  src/               # lib.rs, error.rs, fts.rs (+ fts/bm25.rs),
                      # hnsw.rs (+ hnsw/stub.rs), persistence.rs, rrf.rs
   tests/             # api_smoke.rs, index_rrf_composition.rs, oracle/,
                      # persistence_contract.rs, persistence_schema_closed.rs,
@@ -55,7 +55,7 @@ cargo test --workspace
 
 - **Errors:** `snafu` with `.context()` propagation, `Location` on every variant, `PersistenceSource` type-erases only at the backend boundary.
 - **Traits:** `VectorIndex`, `FtsIndex`, `PersistenceBackend` carry the cross-engine contracts. Default methods exist only where the override would be uniform across implementors (e.g., `is_empty`).
-- **Stubs:** Phase 1 ships typed stubs for HNSW and BM25 that return `HeuremaError::NotYetImplemented { feature: "Phase 2: …" }`. Stubs preserve trait bounds so consumers compile and exercise the API shape before the real engines land.
+- **Stubs:** HNSW retains its Phase 1 typed stub and returns `HeuremaError::NotYetImplemented { feature: "Phase 2: …" }`. Stubs preserve trait bounds so consumers compile and exercise the API shape before the real vector engine lands. BM25 implements the Simple pipeline; named alternative analyzer pipelines return an explicit unsupported result.
 - **Persistence adapters:** `AtmisBackend` and `ThesaurosBackend` both encode through `serde_json`, never by cloning the live `I` — that byte-level round trip is what proves the encode/decode path a durable backend depends on. `PersistenceBackend`'s save methods bound `I: Serialize`, its load methods bound `I: DeserializeOwned` (`persistence.rs`); a caller-chosen index type needs both derives to satisfy an adapter.
 - **No suppressions without `reason`:** `#[expect(lint, reason = "…")]` not `#[allow]`. The `reason` documents the invariant, not the lint name.
 - **No `unsafe`:** workspace `unsafe_code = "forbid"`. HNSW follows the published algorithm; the implementation is written here, and this crate stays safe Rust end-to-end.

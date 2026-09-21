@@ -42,25 +42,6 @@ fn assert_ranking_contract(results: &[(u64, f32)], k: usize) {
 }
 
 #[test]
-fn stub_reports_not_yet_implemented_until_phase_2_lands() {
-    // WHY: tripwire. A real engine makes this fail, and the same commit must
-    // delete it and strip every `#[ignore = "phase 2: ..."]` marker in this
-    // module — otherwise the ignore markers outlive the phase silently.
-    let index = Bm25Index::<u64>::new(FtsConfig::simple());
-
-    let result = index.query("anything", 1);
-
-    let Err(HeuremaError::NotYetImplemented { feature, .. }) = result else {
-        panic!("the Phase 1 stub must report NotYetImplemented, got {result:?}");
-    };
-    assert!(
-        feature.contains("Phase 2"),
-        "the stub names the landing phase, got {feature}"
-    );
-}
-
-#[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn empty_index_query_returns_no_results() -> Result<(), HeuremaError> {
     let index = Bm25Index::<u64>::new(FtsConfig::simple());
 
@@ -74,7 +55,6 @@ fn empty_index_query_returns_no_results() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn len_tracks_inserts() -> Result<(), HeuremaError> {
     let docs = ["one two", "three four", "five six"];
     let mut index = Bm25Index::<u64>::new(FtsConfig::simple());
@@ -87,7 +67,6 @@ fn len_tracks_inserts() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn no_match_query_returns_no_results() -> Result<(), HeuremaError> {
     let index = index_of(&["alpha beta", "gamma delta", "epsilon zeta"])?;
 
@@ -101,7 +80,6 @@ fn no_match_query_returns_no_results() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn query_results_satisfy_the_ranking_contract() -> Result<(), HeuremaError> {
     let mut index = Bm25Index::<u64>::new(FtsConfig::simple());
     index.insert(9, "alpha beta gamma")?;
@@ -137,7 +115,6 @@ fn query_results_satisfy_the_ranking_contract() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn rare_term_outranks_common_term_on_the_same_document() -> Result<(), HeuremaError> {
     // WHY: the published idf is strictly decreasing in document frequency
     // under both standard forms (Robertson's ln((N - df + 0.5)/(df + 0.5))
@@ -160,7 +137,6 @@ fn rare_term_outranks_common_term_on_the_same_document() -> Result<(), HeuremaEr
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn scores_are_non_negative_for_uncommon_terms() -> Result<(), HeuremaError> {
     // WHY: both published idf forms are non-negative for df <= N/2, and the
     // tf component is non-negative, so queries over uncommon terms never
@@ -188,7 +164,6 @@ fn scores_are_non_negative_for_uncommon_terms() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn term_frequency_saturates() -> Result<(), HeuremaError> {
     // WHY: the published tf component x(k1+1)/(x + k1*c) is strictly concave
     // in x, so each added occurrence scores less than the last. Equal
@@ -221,7 +196,6 @@ fn term_frequency_saturates() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn length_normalization_prefers_the_shorter_document() -> Result<(), HeuremaError> {
     // WHY: the published length-normalization factor 1 - b + b*dl/avgdl
     // penalizes above-average document lengths for b > 0, so at equal term
@@ -250,7 +224,6 @@ fn length_normalization_prefers_the_shorter_document() -> Result<(), HeuremaErro
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn per_term_contributions_sum_for_multi_term_queries() -> Result<(), HeuremaError> {
     // WHY: the published score is a sum over query terms of idf * tf-norm, so
     // a two-term query scores the sum of the single-term scores on a document
@@ -277,7 +250,6 @@ fn per_term_contributions_sum_for_multi_term_queries() -> Result<(), HeuremaErro
 }
 
 #[test]
-#[ignore = "phase 2: real BM25 engine lands (tests/oracle/PARITY.md)"]
 fn remove_is_idempotent_and_excludes_the_document() -> Result<(), HeuremaError> {
     let docs = [
         "alpha x0 y0",

@@ -1,4 +1,4 @@
-//! BM25 full-text index contract and Phase 1 stub type.
+//! BM25 full-text index contract and implementation.
 
 use std::hash::Hash;
 
@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::HeuremaError;
 
-mod stub;
+mod bm25;
 
-pub use stub::Bm25Index;
+pub use bm25::Bm25Index;
 
 /// WHY: Krites models tokenizers and filters as named components with argument
 /// lists; Heurēma keeps that shape without importing krites `DataValue`.

@@ -72,14 +72,20 @@ fn hnsw_stub_reports_dimension_mismatch_before_implementation() {
 }
 
 #[test]
-fn fts_stub_exposes_bm25_index_contract() {
+fn bm25_index_exposes_full_text_contract() -> Result<(), HeuremaError> {
     let mut index = Bm25Index::<String>::new(FtsConfig::simple());
     let doc_id = String::from("doc:1");
 
-    assert!(index.is_empty(), "new FTS stub should be empty");
-    assert_not_yet(index.insert(doc_id.clone(), "search text"));
-    assert_not_yet(index.query("search", 10));
-    assert_not_yet(index.remove(&doc_id));
+    assert!(index.is_empty(), "new BM25 index should be empty");
+    index.insert(doc_id.clone(), "search text")?;
+    assert_eq!(index.len(), 1, "inserted document is indexed");
+    assert_eq!(
+        index.query("SEARCH", 10)?.first().map(|(id, _)| id),
+        Some(&doc_id)
+    );
+    index.remove(&doc_id)?;
+    assert!(index.is_empty(), "removal is reflected in cardinality");
+    Ok(())
 }
 
 fn assert_not_yet<T>(result: Result<T, HeuremaError>) {
