@@ -59,6 +59,30 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
+    /// WHY: graph distances require finite coordinates; accepting a NaN would
+    /// make ordering and persisted graph topology non-deterministic.
+    #[snafu(display("invalid vector: {reason}"))]
+    InvalidVector {
+        /// Validation failure.
+        reason: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: `HnswConfig::new` remains a data constructor for compatibility,
+    /// so an invalid deserialized or manually assembled configuration is
+    /// refused at the engine boundary rather than creating a graph with no
+    /// navigable-link capacity.
+    #[snafu(display("invalid HNSW configuration: {reason}"))]
+    InvalidHnswConfig {
+        /// Validation failure.
+        reason: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
     /// WHY: Rank fusion must reject a malformed dampening constant with a
     /// typed error instead of panicking inside library code.
     #[snafu(display("invalid RRF k_constant: {k_constant} (must be finite and positive)"))]

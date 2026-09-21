@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::HeuremaError;
 
-mod stub;
+mod engine;
 
-pub use stub::HnswIndex;
+pub use engine::HnswIndex;
 
 const DEFAULT_EF_CONSTRUCTION: usize = 50;
 const DEFAULT_M_NEIGHBOURS: usize = 16;

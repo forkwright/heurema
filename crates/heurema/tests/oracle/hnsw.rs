@@ -62,25 +62,6 @@ fn dimension_mismatch_is_rejected_before_state_change() {
 }
 
 #[test]
-fn stub_reports_not_yet_implemented_until_phase_2_lands() {
-    // WHY: tripwire. A real engine makes this fail, and the same commit must
-    // delete it and strip every `#[ignore = "phase 2: ..."]` marker in this
-    // module — otherwise the ignore markers outlive the phase silently.
-    let mut index = HnswIndex::<u64>::new(HnswConfig::new(4));
-
-    let result = index.insert(1, &[0.0; 4]);
-
-    let Err(HeuremaError::NotYetImplemented { feature, .. }) = result else {
-        panic!("the Phase 1 stub must report NotYetImplemented, got {result:?}");
-    };
-    assert!(
-        feature.contains("Phase 2"),
-        "the stub names the landing phase, got {feature}"
-    );
-}
-
-#[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn empty_index_query_returns_no_results() -> Result<(), HeuremaError> {
     let index = HnswIndex::<u64>::new(HnswConfig::new(8));
 
@@ -94,7 +75,6 @@ fn empty_index_query_returns_no_results() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn len_tracks_inserts() -> Result<(), HeuremaError> {
     let vectors = seeded_vectors(0x5EED_000B, 5, 4);
     let mut index = HnswIndex::<u64>::new(HnswConfig::new(4));
@@ -107,7 +87,6 @@ fn len_tracks_inserts() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn query_results_satisfy_the_ranking_contract() -> Result<(), HeuremaError> {
     let vectors = seeded_vectors(0x5EED_0008, 64, 8);
     let mut index = HnswIndex::<u64>::new(HnswConfig::new(8));
@@ -128,7 +107,6 @@ fn query_results_satisfy_the_ranking_contract() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn smaller_k_is_a_prefix_of_larger_k() -> Result<(), HeuremaError> {
     let vectors = seeded_vectors(0x5EED_0006, 64, 8);
     let mut index = HnswIndex::<u64>::new(HnswConfig::new(8));
@@ -149,7 +127,6 @@ fn smaller_k_is_a_prefix_of_larger_k() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn equal_distance_ties_order_by_ascending_id() -> Result<(), HeuremaError> {
     let mut index = HnswIndex::<u64>::new(HnswConfig::new(4));
     index.insert(9, &[1.0, 2.0, 3.0, 4.0])?;
@@ -167,7 +144,6 @@ fn equal_distance_ties_order_by_ascending_id() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn self_query_returns_the_inserted_vector_first_at_zero_distance() -> Result<(), HeuremaError> {
     let vectors = seeded_vectors(0x5EED_0005, 16, 8);
 
@@ -197,7 +173,6 @@ fn self_query_returns_the_inserted_vector_first_at_zero_distance() -> Result<(),
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn cosine_distance_with_a_zero_vector_stays_finite() -> Result<(), HeuremaError> {
     // WHY: cosine distance divides by vector norms, so the zero vector is the
     // formula's one degenerate input; the pinned oracle observes no-NaN for
@@ -227,7 +202,6 @@ fn cosine_distance_with_a_zero_vector_stays_finite() -> Result<(), HeuremaError>
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn recall_against_brute_force_meets_floor() -> Result<(), HeuremaError> {
     // WHY 0.90: at 256 points with the paper's default m = 16 and
     // ef_construction = 50 the graph is dense relative to N, so exact recall
@@ -267,7 +241,6 @@ fn recall_against_brute_force_meets_floor() -> Result<(), HeuremaError> {
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn queries_terminate_and_stay_bounded_on_a_dense_fixture() -> Result<(), HeuremaError> {
     // WHY: greedy-descent termination is observable through the trait only as
     // "query returns"; this fixture's 32 queries over 512 vectors completing
@@ -289,7 +262,6 @@ fn queries_terminate_and_stay_bounded_on_a_dense_fixture() -> Result<(), Heurema
 }
 
 #[test]
-#[ignore = "phase 2: real HNSW engine lands (tests/oracle/PARITY.md)"]
 fn remove_is_idempotent_and_excludes_the_id_from_results() -> Result<(), HeuremaError> {
     let vectors = seeded_vectors(0x5EED_000A, 32, 8);
     let mut index = HnswIndex::<u64>::new(HnswConfig::new(8));
