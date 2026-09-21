@@ -6,9 +6,8 @@ moves from its intended red state to green.
 
 ## Red state (now)
 
-Every engine-dependent test in this directory carries
-`#[ignore = "phase 2: ..."]` because the Phase 1 stubs answer
-`HeuremaError::NotYetImplemented`. Three tests run live:
+The BM25 oracle cases run live against the fresh Simple-pipeline engine. HNSW cases remain
+`#[ignore = "phase 2: ..."]` while its Phase 1 stub answers `HeuremaError::NotYetImplemented`. Two HNSW tests run live:
 
 - `hnsw::dimension_mismatch_is_rejected_before_state_change` — the stub
   already honours the dimension-check contract, so the harness demonstrably
@@ -18,9 +17,7 @@ Every engine-dependent test in this directory carries
   that assert the stub's `NotYetImplemented` and go red the moment a real
   engine answers.
 
-`cargo test -p heurema --test oracle` is green today with 20 ignored.
-`cargo test -p heurema --test oracle -- --include-ignored` fails all 20 with
-`NotYetImplemented` — that failure is the intended red state, not a defect.
+`cargo test -p heurema --test oracle` runs the BM25 oracle live and leaves only the HNSW cases ignored. `--include-ignored` is reserved for HNSW development until a graph engine replaces that stub.
 
 ## Green definition (Phase 2 exit)
 
