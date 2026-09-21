@@ -452,7 +452,9 @@ where
         self.validate_vector(vector)?;
         self.remove_node(&id);
         let level = self.next_level();
-        let old_entry = self.entry_point.clone();
+        // `remove_node` reanchors a replacement's former backbone before we
+        // select this entry, so it is always a surviving graph vertex.
+        let surviving_entry = self.entry_point.clone();
         self.nodes.insert(
             id.clone(),
             Node {
@@ -462,7 +464,7 @@ where
                 backbone: BTreeSet::new(),
             },
         );
-        let Some(mut entry) = old_entry else {
+        let Some(mut entry) = surviving_entry else {
             self.reselect_entry();
             return Ok(());
         };
@@ -670,6 +672,31 @@ mod tests {
                 "repair must retain useful graph recall after deletion/replacement"
             );
         }
+    }
+
+    #[test]
+    fn replacing_the_current_entry_reanchors_before_graph_search_and_round_trip() {
+        let mut index = HnswIndex::<u64>::new(HnswConfig::new(4));
+        for id in 0..96_u64 {
+            index.insert(id, &fixture_vector(id)).expect("valid insert");
+        }
+        let entry = index.entry_point.expect("populated graph has an entry");
+        index
+            .insert(entry, &[0.07, 0.19, 0.31, 0.43])
+            .expect("entry replacement reconnects through a surviving entry");
+        assert_base_reachable(&index);
+        let restored: HnswIndex<u64> =
+            serde_json::from_slice(&serde_json::to_vec(&index).expect("serializable reanchor"))
+                .expect("reanchored snapshot reopens");
+        assert_base_reachable(&restored);
+        assert_eq!(
+            index
+                .query(&[0.07, 0.19, 0.31, 0.43], 5)
+                .expect("original remains queryable"),
+            restored
+                .query(&[0.07, 0.19, 0.31, 0.43], 5)
+                .expect("restored graph remains queryable"),
+        );
     }
 
     #[test]
