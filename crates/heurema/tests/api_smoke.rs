@@ -42,13 +42,21 @@ fn fts_config_simple_pins_krites_default_tokenizer() {
 }
 
 #[test]
-fn hnsw_stub_exposes_vector_index_contract() {
+fn hnsw_exposes_vector_index_contract() -> Result<(), HeuremaError> {
     let mut index = HnswIndex::<u64>::new(HnswConfig::new(3));
 
-    assert!(index.is_empty(), "new HNSW stub should be empty");
-    assert_not_yet(index.insert(7, &[1.0, 2.0, 3.0]));
-    assert_not_yet(index.query(&[1.0, 2.0, 3.0], 10));
-    assert_not_yet(index.remove(&7));
+    assert!(index.is_empty(), "new HNSW graph should be empty");
+    index.insert(7, &[1.0, 2.0, 3.0])?;
+    assert_eq!(
+        index
+            .query(&[1.0, 2.0, 3.0], 10)?
+            .first()
+            .map(|(id, _)| *id),
+        Some(7)
+    );
+    index.remove(&7)?;
+    assert!(index.is_empty());
+    Ok(())
 }
 
 #[test]
@@ -86,17 +94,4 @@ fn bm25_index_exposes_full_text_contract() -> Result<(), HeuremaError> {
     index.remove(&doc_id)?;
     assert!(index.is_empty(), "removal is reflected in cardinality");
     Ok(())
-}
-
-fn assert_not_yet<T>(result: Result<T, HeuremaError>) {
-    match result {
-        Err(HeuremaError::NotYetImplemented { feature, .. }) => {
-            assert!(
-                feature.contains("Phase 2"),
-                "stub error should point callers at Phase 2"
-            );
-        }
-        Ok(_) => panic!("expected NotYetImplemented, got Ok"),
-        Err(other) => panic!("expected NotYetImplemented, got {other:?}"),
-    }
 }

@@ -74,6 +74,35 @@ fn vector_index_survives_close_and_reopen() -> Result<(), HeuremaError> {
 }
 
 #[test]
+fn populated_hnsw_rankings_and_mutations_survive_close_and_reopen() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
+    let mut original = HnswIndex::<u64>::new(HnswConfig::new(2));
+    for id in 0..24 {
+        original.insert(id, &[id as f32, (id % 5) as f32])?;
+    }
+    {
+        let backend = ThesaurosBackend::open(dir.path())?;
+        backend.save_vector_index("embeddings", &original)?;
+    }
+    let reopened = ThesaurosBackend::open(dir.path())?;
+    let mut restored: HnswIndex<u64> = reopened.load_vector_index("embeddings")?;
+    assert_eq!(
+        original.query(&[7.2, 2.0], 6)?,
+        restored.query(&[7.2, 2.0], 6)?
+    );
+    for index in [&mut original, &mut restored] {
+        index.insert(7, &[70.0, 7.0])?;
+        index.remove(&3)?;
+    }
+    assert_eq!(
+        original.query(&[70.0, 7.0], 6)?,
+        restored.query(&[70.0, 7.0], 6)?
+    );
+    assert_eq!(original.len(), restored.len());
+    Ok(())
+}
+
+#[test]
 fn fts_index_survives_close_and_reopen() -> Result<(), HeuremaError> {
     let dir = tempfile::tempdir().map_err(io_error)?;
 

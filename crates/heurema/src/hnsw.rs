@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::HeuremaError;
 
-mod stub;
+mod engine;
 
-pub use stub::HnswIndex;
+pub use engine::HnswIndex;
 
 const DEFAULT_EF_CONSTRUCTION: usize = 50;
 const DEFAULT_M_NEIGHBOURS: usize = 16;
@@ -34,10 +34,12 @@ pub enum VectorDistance {
 /// recall, and storage shape depend on them.
 ///
 /// WHY `Serialize` + `Deserialize`: see [`VectorDistance`]. `new` fills
-/// defaults for the unset fields but validates nothing, so every field
-/// combination deserializes to a valid value; this is a pure data-transfer
-/// type, not a validated newtype, and the plain derive is the correct form
-/// per `RUST.md` § Serde validation. `deny_unknown_fields` still applies —
+/// defaults for the unset fields but validates nothing. The DTO therefore
+/// deserializes structurally valid field combinations, while `HnswIndex`
+/// validates non-zero dimensions, `m_neighbours`, and `ef_construction` at
+/// its mutation and snapshot boundary. It is not a validated newtype, and
+/// the plain derive is the correct form per `RUST.md` § Serde validation.
+/// `deny_unknown_fields` still applies —
 /// bytes decoding as a different concrete config shape under a shared
 /// `PersistenceBackend` snapshot name is a real failure mode
 /// (`crates/thesauros/tests/persistence_fjall.rs` exercises it), and a
@@ -117,6 +119,9 @@ pub trait VectorIndex {
     /// Implementations must return [`HeuremaError::DimensionMismatch`] when
     /// `vector.len()` differs from the dimensionality the index was
     /// configured with.
+    /// They must return [`HeuremaError::DistanceNotRepresentable`] if a
+    /// mathematically finite distance cannot be represented by the public
+    /// finite `f32` score, rather than clamp or return an infinite score.
     fn query(&self, vector: &[f32], k: usize) -> Result<Vec<(Self::Id, f32)>, HeuremaError>;
 
     /// WHY: Remove mirrors krites `hnsw_remove`: deleting a base row must also
