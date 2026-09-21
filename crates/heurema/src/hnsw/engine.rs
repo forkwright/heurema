@@ -6,7 +6,10 @@ use std::hash::Hash;
 use serde::{Deserialize, Serialize};
 
 use crate::HeuremaError;
-use crate::error::{DimensionMismatchSnafu, InvalidHnswConfigSnafu, InvalidVectorSnafu};
+use crate::error::{
+    DimensionMismatchSnafu, DistanceNotRepresentableSnafu, InvalidHnswConfigSnafu,
+    InvalidVectorSnafu,
+};
 use crate::hnsw::{HnswConfig, VectorDistance, VectorIndex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +22,10 @@ struct Node<Id> {
     vector: Vec<f32>,
     level: usize,
     neighbours: Vec<BTreeSet<Id>>,
+    // A separate reciprocal base-layer tree. Normal HNSW links can be pruned
+    // to their degree limits; backbone links cannot, so local mutation never
+    // silently disconnects traversal from the entry component.
+    backbone: BTreeSet<Id>,
 }
 
 /// A hierarchical navigable small-world graph.
@@ -57,6 +64,9 @@ impl<Id: Ord + Clone> TryFrom<RawHnswIndex<Id>> for HnswIndex<Id> {
 
     fn try_from(raw: RawHnswIndex<Id>) -> Result<Self, Self::Error> {
         validate_config(&raw.config)?;
+        if raw.level_state == 0 {
+            return Err("HNSW snapshot PRNG state must be non-zero");
+        }
         let expected_entry = select_entry(&raw.nodes);
         if raw.entry_point != expected_entry {
             return Err("HNSW snapshot entry point disagrees with graph levels");
@@ -74,6 +84,9 @@ impl<Id: Ord + Clone> TryFrom<RawHnswIndex<Id>> for HnswIndex<Id> {
                 return Err("HNSW snapshot node shape disagrees with configuration");
             }
             for (level, neighbours) in node.neighbours.iter().enumerate() {
+                if neighbours.len() > degree_limit(&raw.config, level) {
+                    return Err("HNSW snapshot exceeds a normal-link degree limit");
+                }
                 for neighbour in neighbours {
                     if neighbour == id {
                         return Err("HNSW snapshot has a self-neighbour");
@@ -85,6 +98,41 @@ impl<Id: Ord + Clone> TryFrom<RawHnswIndex<Id>> for HnswIndex<Id> {
                         return Err("HNSW snapshot has a non-reciprocal neighbour");
                     }
                 }
+            }
+            for neighbour in &node.backbone {
+                if neighbour == id {
+                    return Err("HNSW snapshot has a self backbone link");
+                }
+                let Some(other) = raw.nodes.get(neighbour) else {
+                    return Err("HNSW snapshot has a dangling backbone link");
+                };
+                if !other.backbone.contains(id) {
+                    return Err("HNSW snapshot has a non-reciprocal backbone link");
+                }
+            }
+        }
+        if !raw.nodes.is_empty() {
+            let edges = raw
+                .nodes
+                .values()
+                .map(|node| node.backbone.len())
+                .sum::<usize>()
+                / 2;
+            if edges != raw.nodes.len() - 1 {
+                return Err("HNSW snapshot backbone is not a tree");
+            }
+            let Some(start) = raw.nodes.keys().next().cloned() else {
+                return Err("HNSW snapshot has no backbone root");
+            };
+            let mut seen = BTreeSet::new();
+            let mut pending = vec![start];
+            while let Some(id) = pending.pop() {
+                if seen.insert(id.clone()) {
+                    pending.extend(raw.nodes[&id].backbone.iter().cloned());
+                }
+            }
+            if seen.len() != raw.nodes.len() {
+                return Err("HNSW snapshot backbone is disconnected");
             }
         }
         Ok(Self {
@@ -147,17 +195,32 @@ impl<Id> HnswIndex<Id>
 where
     Id: Ord + Hash + Clone,
 {
-    fn distance(&self, left: &[f32], right: &[f32]) -> f32 {
+    fn distance(&self, left: &[f32], right: &[f32]) -> f64 {
         match self.config.distance {
-            VectorDistance::L2 => left.iter().zip(right).map(|(a, b)| (a - b) * (a - b)).sum(),
-            VectorDistance::InnerProduct => {
-                -left.iter().zip(right).map(|(a, b)| a * b).sum::<f32>()
-            }
+            VectorDistance::L2 => left
+                .iter()
+                .zip(right)
+                .map(|(a, b)| {
+                    let difference = f64::from(*a) - f64::from(*b);
+                    difference * difference
+                })
+                .sum(),
+            VectorDistance::InnerProduct => -left
+                .iter()
+                .zip(right)
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum::<f64>(),
             VectorDistance::Cosine => {
                 let (dot, left_norm, right_norm) = left.iter().zip(right).fold(
-                    (0.0_f32, 0.0_f32, 0.0_f32),
+                    (0.0_f64, 0.0_f64, 0.0_f64),
                     |(dot, left_norm, right_norm), (a, b)| {
-                        (dot + a * b, left_norm + a * a, right_norm + b * b)
+                        let left = f64::from(*a);
+                        let right = f64::from(*b);
+                        (
+                            dot + left * right,
+                            left_norm + left * left,
+                            right_norm + right * right,
+                        )
                     },
                 );
                 if left_norm == 0.0 && right_norm == 0.0 {
@@ -171,7 +234,7 @@ where
         }
     }
 
-    fn node_distance(&self, vector: &[f32], id: &Id) -> Option<f32> {
+    fn node_distance(&self, vector: &[f32], id: &Id) -> Option<f64> {
         self.nodes
             .get(id)
             .map(|node| self.distance(vector, &node.vector))
@@ -179,8 +242,8 @@ where
 
     fn compare_ids_by_distance(&self, vector: &[f32], left: &Id, right: &Id) -> std::cmp::Ordering {
         self.node_distance(vector, left)
-            .unwrap_or(f32::INFINITY)
-            .total_cmp(&self.node_distance(vector, right).unwrap_or(f32::INFINITY))
+            .unwrap_or(f64::INFINITY)
+            .total_cmp(&self.node_distance(vector, right).unwrap_or(f64::INFINITY))
             .then_with(|| left.cmp(right))
     }
 
@@ -209,6 +272,16 @@ where
                     .is_lt()
                 {
                     next = neighbour.clone();
+                }
+            }
+            if level == 0 {
+                for neighbour in &node.backbone {
+                    if self
+                        .compare_ids_by_distance(vector, neighbour, &next)
+                        .is_lt()
+                    {
+                        next = neighbour.clone();
+                    }
                 }
             }
             if next == current {
@@ -247,30 +320,30 @@ where
                         frontier.push(neighbour.clone());
                     }
                 }
+                if level == 0 {
+                    for neighbour in &node.backbone {
+                        if !visited.contains(neighbour) {
+                            frontier.push(neighbour.clone());
+                        }
+                    }
+                }
             }
         }
         results
     }
 
     fn degree_limit(&self, level: usize) -> usize {
-        if level == 0 {
-            self.config.m_neighbours.saturating_mul(2)
-        } else {
-            self.config.m_neighbours
-        }
+        degree_limit(&self.config, level)
     }
 
-    fn prune(&mut self, id: &Id, level: usize, protected: Option<&Id>) {
+    fn prune(&mut self, id: &Id, level: usize) {
         let Some(vector) = self.nodes.get(id).map(|node| node.vector.clone()) else {
             return;
         };
         let limit = self.degree_limit(level);
         let mut ranked: Vec<Id> = self.nodes[id].neighbours[level].iter().cloned().collect();
         ranked.sort_by(|left, right| self.compare_ids_by_distance(&vector, left, right));
-        let mut retained: BTreeSet<Id> = ranked.into_iter().take(limit).collect();
-        if let Some(protected) = protected {
-            retained.insert(protected.clone());
-        }
+        let retained: BTreeSet<Id> = ranked.into_iter().take(limit).collect();
         let removed: Vec<Id> = self.nodes[id].neighbours[level]
             .difference(&retained)
             .cloned()
@@ -280,14 +353,7 @@ where
         };
         node.neighbours[level] = retained;
         for other in removed {
-            // Do not cut a node's sole reciprocal route during construction.
-            // A later, denser insertion can prune it once another route is
-            // present; this keeps each completed insertion navigable.
-            if self.nodes[&other].neighbours[level].len() <= 1 {
-                if let Some(node) = self.nodes.get_mut(id) {
-                    node.neighbours[level].insert(other);
-                }
-            } else if let Some(node) = self.nodes.get_mut(&other) {
+            if let Some(node) = self.nodes.get_mut(&other) {
                 node.neighbours[level].remove(id);
             }
         }
@@ -305,8 +371,8 @@ where
             return;
         };
         target.neighbours[level].insert(left.clone());
-        self.prune(left, level, Some(right));
-        self.prune(right, level, Some(left));
+        self.prune(left, level);
+        self.prune(right, level);
     }
 
     fn reselect_entry(&mut self) {
@@ -319,62 +385,15 @@ where
         self.entry_point = select_entry(&self.nodes);
     }
 
-    fn base_components(&self) -> Vec<BTreeSet<Id>> {
-        let mut unseen: BTreeSet<Id> = self.nodes.keys().cloned().collect();
-        let mut components = Vec::new();
-        while let Some(start) = unseen.iter().next().cloned() {
-            let mut component = BTreeSet::new();
-            let mut pending = vec![start];
-            while let Some(id) = pending.pop() {
-                if !component.insert(id.clone()) {
-                    continue;
-                }
-                unseen.remove(&id);
-                pending.extend(self.nodes[&id].neighbours[0].iter().cloned());
-            }
-            components.push(component);
+    fn connect_backbone(&mut self, left: &Id, right: &Id) {
+        if left == right {
+            return;
         }
-        components
-    }
-
-    fn repair_base_connectivity(&mut self) {
-        // Mutual degree pruning can remove a bridge during replacement or
-        // deletion. This is an insertion/removal repair, never a query
-        // fallback: it restores one nearest cross-component graph edge, then
-        // repeats only while the stored graph is actually disconnected.
-        loop {
-            let components = self.base_components();
-            if components.len() < 2 {
-                return;
-            }
-            let mut best: Option<(Id, Id, f32)> = None;
-            for left in &components[0] {
-                let vector = self.nodes[left].vector.clone();
-                for component in components.iter().skip(1) {
-                    for right in component {
-                        let Some(distance) = self.node_distance(&vector, right) else {
-                            continue;
-                        };
-                        if best
-                            .as_ref()
-                            .is_none_or(|(best_left, best_right, best_distance)| {
-                                distance.total_cmp(best_distance).is_lt()
-                                    || (distance.total_cmp(best_distance).is_eq()
-                                        && (left, right) < (best_left, best_right))
-                            })
-                        {
-                            best = Some((left.clone(), right.clone(), distance));
-                        }
-                    }
-                }
-            }
-            let Some((left, right, _)) = best else { return };
-            if let Some(source) = self.nodes.get_mut(&left) {
-                source.neighbours[0].insert(right.clone());
-            }
-            if let Some(target) = self.nodes.get_mut(&right) {
-                target.neighbours[0].insert(left);
-            }
+        if let Some(node) = self.nodes.get_mut(left) {
+            node.backbone.insert(right.clone());
+        }
+        if let Some(node) = self.nodes.get_mut(right) {
+            node.backbone.insert(left.clone());
         }
     }
 
@@ -405,8 +424,21 @@ where
                 }
             }
         }
+        // The backbone is a tree. Removing one vertex splits only the local
+        // incident subtrees; chaining those neighbours reconnects them without
+        // a graph-wide component scan or exceeding normal HNSW degree bounds.
+        let anchors: Vec<Id> = node.backbone.into_iter().collect();
+        for anchor in &anchors {
+            if let Some(other) = self.nodes.get_mut(anchor) {
+                other.backbone.remove(id);
+            }
+        }
+        if let Some(first) = anchors.first() {
+            for other in anchors.iter().skip(1) {
+                self.connect_backbone(first, other);
+            }
+        }
         self.reselect_entry();
-        self.repair_base_connectivity();
     }
 }
 
@@ -427,12 +459,17 @@ where
                 vector: vector.to_vec(),
                 level,
                 neighbours: (0..=level).map(|_| BTreeSet::new()).collect(),
+                backbone: BTreeSet::new(),
             },
         );
         let Some(mut entry) = old_entry else {
             self.reselect_entry();
             return Ok(());
         };
+        // Normal links are degree-pruned HNSW shortcuts. The separate
+        // backbone edge is never pruned and therefore keeps the entry
+        // component traversable through insertion, replacement, and removal.
+        self.connect_backbone(&id, &entry);
         for current_level in ((level + 1)..=self.max_level).rev() {
             entry = self.greedy_at_level(vector, entry, current_level);
         }
@@ -453,7 +490,6 @@ where
             entry = self.greedy_at_level(vector, entry, current_level);
         }
         self.reselect_entry();
-        self.repair_base_connectivity();
         Ok(())
     }
 
@@ -469,14 +505,25 @@ where
             entry = self.greedy_at_level(vector, entry, level);
         }
         let candidates = self.search_layer(vector, vec![entry], 0, self.query_beam(k));
-        Ok(candidates
+        candidates
             .into_iter()
             .take(k)
             .filter_map(|id| {
                 self.node_distance(vector, &id)
                     .map(|distance| (id, distance))
             })
-            .collect())
+            .map(|(id, distance)| {
+                let score = distance as f32;
+                if score.is_finite() {
+                    Ok((id, score))
+                } else {
+                    Err(DistanceNotRepresentableSnafu {
+                        reason: format!("{distance} cannot be returned by VectorIndex::query"),
+                    }
+                    .build())
+                }
+            })
+            .collect()
     }
 
     fn remove(&mut self, id: &Self::Id) -> Result<(), HeuremaError> {
@@ -526,6 +573,14 @@ fn validate_config(config: &HnswConfig) -> Result<(), &'static str> {
     }
 }
 
+fn degree_limit(config: &HnswConfig, level: usize) -> usize {
+    if level == 0 {
+        config.m_neighbours.saturating_mul(2)
+    } else {
+        config.m_neighbours
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests need concise fixture failures")]
 mod tests {
@@ -538,7 +593,7 @@ mod tests {
     }
 
     fn exact_top(index: &HnswIndex<u64>, query: &[f32], k: usize) -> Vec<u64> {
-        let mut scored: Vec<(u64, f32)> = index
+        let mut scored: Vec<(u64, f64)> = index
             .nodes
             .iter()
             .map(|(id, node)| (*id, index.distance(query, &node.vector)))
@@ -559,6 +614,7 @@ mod tests {
                 continue;
             }
             pending.extend(index.nodes[&id].neighbours[0].iter().copied());
+            pending.extend(index.nodes[&id].backbone.iter().copied());
         }
         assert_eq!(seen.len(), index.len(), "base graph must remain navigable");
     }
@@ -574,8 +630,8 @@ mod tests {
             index
                 .nodes
                 .values()
-                .all(|node| node.neighbours[0].len() <= 33),
-            "repair may retain one bridge over the base 2m degree limit"
+                .all(|node| node.neighbours[0].len() <= 32),
+            "normal HNSW links must remain within their base 2m degree limit"
         );
         let mut levels = [0_usize; 4];
         for node in index.nodes.values() {
@@ -617,6 +673,35 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_backbone_articulation_reanchors_every_local_component() {
+        let mut index = HnswIndex::<u64>::new(HnswConfig::new(2));
+        for id in 0..4 {
+            index.nodes.insert(
+                id,
+                Node {
+                    vector: vec![id as f32, 0.0],
+                    level: 0,
+                    neighbours: vec![BTreeSet::new()],
+                    backbone: BTreeSet::new(),
+                },
+            );
+        }
+        for id in 1..4 {
+            index.connect_backbone(&0, &id);
+        }
+        index.reselect_entry();
+        index.remove(&0).expect("removal is valid");
+        assert_base_reachable(&index);
+        let result_ids: Vec<u64> = index
+            .query(&[3.0, 0.0], 3)
+            .expect("backbone is part of graph traversal")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(result_ids.first(), Some(&3));
+    }
+
+    #[test]
     fn invalid_vectors_and_snapshots_are_rejected_before_use() {
         let mut index = HnswIndex::<u64>::new(HnswConfig::new(2));
         assert!(matches!(
@@ -634,5 +719,59 @@ mod tests {
             serde_json::from_value::<HnswIndex<u64>>(value).is_err(),
             "dangling entry point must not load"
         );
+    }
+
+    #[test]
+    fn finite_extreme_vectors_use_f64_ranking_and_reject_unrepresentable_scores() {
+        let mut index = HnswIndex::<u64>::new(HnswConfig::new(2));
+        index
+            .insert(1, &[f32::MAX, f32::MAX])
+            .expect("finite coordinates remain indexable");
+        index.insert(2, &[0.0, 0.0]).expect("finite coordinates");
+        assert!(matches!(
+            index.query(&[0.0, 0.0], 2),
+            Err(HeuremaError::DistanceNotRepresentable { .. })
+        ));
+
+        let mut cosine_config = HnswConfig::new(2);
+        cosine_config.distance = VectorDistance::Cosine;
+        let mut cosine = HnswIndex::<u64>::new(cosine_config);
+        cosine
+            .insert(1, &[f32::MAX, f32::MAX])
+            .expect("finite coordinates remain indexable");
+        cosine
+            .insert(2, &[f32::MAX, -f32::MAX])
+            .expect("finite coordinates remain indexable");
+        let scores = cosine
+            .query(&[f32::MAX, f32::MAX], 2)
+            .expect("f64 cosine arithmetic remains finite");
+        assert!(scores.iter().all(|(_, score)| score.is_finite()));
+    }
+
+    #[test]
+    fn snapshot_rejects_zero_prng_state_disconnected_backbone_and_overdegree_links() {
+        let mut config = HnswConfig::new(2);
+        config.m_neighbours = 1;
+        let mut index = HnswIndex::<u64>::new(config);
+        for id in 0..6 {
+            index.insert(id, &[id as f32, 0.0]).expect("valid insert");
+        }
+        let mut zero_state = serde_json::to_value(&index).expect("serializable graph");
+        zero_state["level_state"] = serde_json::json!(0_u64);
+        assert!(serde_json::from_value::<HnswIndex<u64>>(zero_state).is_err());
+
+        let mut disconnected = serde_json::to_value(&index).expect("serializable graph");
+        disconnected["nodes"]["0"]["backbone"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<HnswIndex<u64>>(disconnected).is_err());
+
+        let mut overdegree = serde_json::to_value(&index).expect("serializable graph");
+        overdegree["nodes"]["0"]["neighbours"][0] = serde_json::json!([1, 2, 3, 4, 5]);
+        for id in 1..6 {
+            overdegree["nodes"][id.to_string()]["neighbours"][0]
+                .as_array_mut()
+                .expect("neighbour array")
+                .push(serde_json::json!(0));
+        }
+        assert!(serde_json::from_value::<HnswIndex<u64>>(overdegree).is_err());
     }
 }

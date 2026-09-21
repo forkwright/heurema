@@ -117,6 +117,9 @@ pub trait VectorIndex {
     /// Implementations must return [`HeuremaError::DimensionMismatch`] when
     /// `vector.len()` differs from the dimensionality the index was
     /// configured with.
+    /// They must return [`HeuremaError::DistanceNotRepresentable`] if a
+    /// mathematically finite distance cannot be represented by the public
+    /// finite `f32` score, rather than clamp or return an infinite score.
     fn query(&self, vector: &[f32], k: usize) -> Result<Vec<(Self::Id, f32)>, HeuremaError>;
 
     /// WHY: Remove mirrors krites `hnsw_remove`: deleting a base row must also

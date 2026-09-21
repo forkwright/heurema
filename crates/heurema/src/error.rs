@@ -70,6 +70,19 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
+    /// WHY: The public vector contract exposes `f32` distances. Ranking is
+    /// performed in `f64` so finite coordinates cannot poison graph ordering,
+    /// but a mathematically finite result that cannot be represented by that
+    /// public score type must be reported rather than clamped or mislabeled.
+    #[snafu(display("vector distance is not representable as a finite f32: {reason}"))]
+    DistanceNotRepresentable {
+        /// Why the finite internal distance cannot cross the public boundary.
+        reason: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
     /// WHY: `HnswConfig::new` remains a data constructor for compatibility,
     /// so an invalid deserialized or manually assembled configuration is
     /// refused at the engine boundary rather than creating a graph with no
