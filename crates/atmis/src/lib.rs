@@ -18,7 +18,10 @@
 use std::collections::HashMap;
 use std::sync::{PoisonError, RwLock};
 
-use heurema::{FtsIndex, HeuremaError, PersistenceBackend, PersistenceSource, VectorIndex};
+use heurema::{
+    FtsIndex, HeuremaError, PersistenceBackend, PersistenceSource, SnapshotEnvelope,
+    SnapshotFamily, VectorIndex, decode_snapshot_payload,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -75,7 +78,8 @@ impl PersistenceBackend for AtmisBackend {
     where
         I: VectorIndex + Serialize,
     {
-        let bytes = serde_json::to_vec(idx).map_err(Self::codec_error)?;
+        let bytes = serde_json::to_vec(&SnapshotEnvelope::new(SnapshotFamily::Vector, idx))
+            .map_err(Self::codec_error)?;
         Self::write(&self.vector_snapshots).insert(name.to_owned(), bytes);
         Ok(())
     }
@@ -86,14 +90,15 @@ impl PersistenceBackend for AtmisBackend {
     {
         let snapshots = Self::read(&self.vector_snapshots);
         let bytes = snapshots.get(name).ok_or_else(|| Self::not_found(name))?;
-        serde_json::from_slice(bytes).map_err(Self::codec_error)
+        decode_snapshot_payload(bytes, SnapshotFamily::Vector)
     }
 
     fn save_fts_index<I>(&self, name: &str, idx: &I) -> Result<(), HeuremaError>
     where
         I: FtsIndex + Serialize,
     {
-        let bytes = serde_json::to_vec(idx).map_err(Self::codec_error)?;
+        let bytes = serde_json::to_vec(&SnapshotEnvelope::new(SnapshotFamily::Fts, idx))
+            .map_err(Self::codec_error)?;
         Self::write(&self.fts_snapshots).insert(name.to_owned(), bytes);
         Ok(())
     }
@@ -104,6 +109,59 @@ impl PersistenceBackend for AtmisBackend {
     {
         let snapshots = Self::read(&self.fts_snapshots);
         let bytes = snapshots.get(name).ok_or_else(|| Self::not_found(name))?;
-        serde_json::from_slice(bytes).map_err(Self::codec_error)
+        decode_snapshot_payload(bytes, SnapshotFamily::Fts)
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests need concise private-store setup")]
+mod tests {
+    use super::*;
+    use heurema::{HnswConfig, HnswIndex};
+
+    fn inject_vector_snapshot(backend: &AtmisBackend, name: &str, bytes: &[u8]) {
+        AtmisBackend::write(&backend.vector_snapshots).insert(name.to_owned(), bytes.to_vec());
+    }
+
+    #[test]
+    fn format_header_refuses_alien_payload_before_vector_decode() {
+        let backend = AtmisBackend::new();
+        inject_vector_snapshot(
+            &backend,
+            "future",
+            br#"{"format_version":2,"family":"Vector","payload":{"alien":true}}"#,
+        );
+        inject_vector_snapshot(
+            &backend,
+            "wrong-family",
+            br#"{"format_version":1,"family":"Fts","payload":{"alien":true}}"#,
+        );
+
+        for name in ["future", "wrong-family"] {
+            assert!(matches!(
+                backend.load_vector_index::<HnswIndex<u64>>(name),
+                Err(HeuremaError::SnapshotFormat { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn current_header_with_an_invalid_payload_remains_a_decode_error() {
+        let backend = AtmisBackend::new();
+        inject_vector_snapshot(
+            &backend,
+            "invalid-current",
+            br#"{"format_version":1,"family":"Vector","payload":{"alien":true}}"#,
+        );
+        assert!(matches!(
+            backend.load_vector_index::<HnswIndex<u64>>("invalid-current"),
+            Err(HeuremaError::Persistence { .. })
+        ));
+
+        let valid = HnswIndex::<u64>::new(HnswConfig::new(2));
+        backend
+            .save_vector_index("valid", &valid)
+            .expect("valid current envelope saves");
+        assert!(backend.load_vector_index::<HnswIndex<u64>>("valid").is_ok());
     }
 }

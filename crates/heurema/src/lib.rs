@@ -30,5 +30,8 @@ pub mod rrf;
 pub use error::{HeuremaError, PersistenceSource};
 pub use fts::{Bm25Index, FtsConfig, FtsIndex, TokenizerConfig};
 pub use hnsw::{HnswConfig, HnswIndex, VectorDistance, VectorIndex};
-pub use persistence::PersistenceBackend;
+pub use persistence::{
+    PersistenceBackend, SNAPSHOT_FORMAT_VERSION, SnapshotEnvelope, SnapshotFamily,
+    decode_snapshot_payload,
+};
 pub use rrf::{DEFAULT_RRF_K_CONSTANT, rrf, rrf_with_default};
