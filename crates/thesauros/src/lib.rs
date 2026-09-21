@@ -16,7 +16,7 @@ use std::path::Path;
 use fjall::KeyspaceCreateOptions;
 use heurema::{
     FtsIndex, HeuremaError, PersistenceBackend, PersistenceSource, SnapshotEnvelope,
-    SnapshotFamily, VectorIndex,
+    SnapshotFamily, VectorIndex, decode_snapshot_payload,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -118,9 +118,7 @@ impl PersistenceBackend for ThesaurosBackend {
             .get(name)
             .map_err(Self::fjall_error)?
             .ok_or_else(|| Self::not_found(name))?;
-        serde_json::from_slice::<SnapshotEnvelope<I>>(&bytes)
-            .map_err(Self::codec_error)?
-            .into_payload(SnapshotFamily::Vector)
+        decode_snapshot_payload(&bytes, SnapshotFamily::Vector)
     }
 
     fn save_fts_index<I>(&self, name: &str, idx: &I) -> Result<(), HeuremaError>
@@ -144,8 +142,6 @@ impl PersistenceBackend for ThesaurosBackend {
             .get(name)
             .map_err(Self::fjall_error)?
             .ok_or_else(|| Self::not_found(name))?;
-        serde_json::from_slice::<SnapshotEnvelope<I>>(&bytes)
-            .map_err(Self::codec_error)?
-            .into_payload(SnapshotFamily::Fts)
+        decode_snapshot_payload(&bytes, SnapshotFamily::Fts)
     }
 }

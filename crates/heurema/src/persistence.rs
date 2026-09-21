@@ -1,10 +1,10 @@
 //! Persistence backend contract for Heurēma indexes.
 
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Serialize};
 
 use crate::error::SnapshotFormatSnafu;
-use crate::{FtsIndex, HeuremaError, VectorIndex};
+use crate::{FtsIndex, HeuremaError, PersistenceSource, VectorIndex};
 
 /// Current on-disk and in-memory snapshot envelope version.
 pub const SNAPSHOT_FORMAT_VERSION: u16 = 1;
@@ -28,6 +28,44 @@ pub struct SnapshotEnvelope<T> {
     payload: T,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotHeader {
+    format_version: u16,
+    family: SnapshotFamily,
+    // Deserialize this as ignored data so format policy is decided before a
+    // caller-chosen engine type observes or validates its payload.
+    #[serde(rename = "payload")]
+    _payload: IgnoredAny,
+}
+
+fn validate_header(
+    format_version: u16,
+    family: SnapshotFamily,
+    expected: SnapshotFamily,
+) -> Result<(), HeuremaError> {
+    if format_version != SNAPSHOT_FORMAT_VERSION {
+        return Err(SnapshotFormatSnafu {
+            reason: format!("format version {format_version} is unsupported"),
+        }
+        .build());
+    }
+    if family != expected {
+        return Err(SnapshotFormatSnafu {
+            reason: format!("expected {expected:?} snapshot, found {family:?}"),
+        }
+        .build());
+    }
+    Ok(())
+}
+
+fn decode_error(source: serde_json::Error) -> HeuremaError {
+    HeuremaError::Persistence {
+        source: PersistenceSource::new(source),
+        location: std::panic::Location::caller(),
+    }
+}
+
 impl<T> SnapshotEnvelope<T> {
     /// Wrap one index payload using the current format.
     #[must_use]
@@ -45,20 +83,26 @@ impl<T> SnapshotEnvelope<T> {
     /// migration can add an explicit decoder without making a partial state
     /// look like a valid current index.
     pub fn into_payload(self, expected: SnapshotFamily) -> Result<T, HeuremaError> {
-        if self.format_version != SNAPSHOT_FORMAT_VERSION {
-            return Err(SnapshotFormatSnafu {
-                reason: format!("format version {} is unsupported", self.format_version),
-            }
-            .build());
-        }
-        if self.family != expected {
-            return Err(SnapshotFormatSnafu {
-                reason: format!("expected {expected:?} snapshot, found {:?}", self.family),
-            }
-            .build());
-        }
+        validate_header(self.format_version, self.family, expected)?;
         Ok(self.payload)
     }
+}
+
+/// Decode one adapter snapshot after validating its format header.
+///
+/// The header deliberately uses [`IgnoredAny`] for `payload`, so an
+/// unsupported version or wrong family is refused before a concrete index
+/// deserializer receives an incompatible payload. Malformed header/current
+/// payload bytes remain [`HeuremaError::Persistence`] decode errors.
+pub fn decode_snapshot_payload<T>(bytes: &[u8], expected: SnapshotFamily) -> Result<T, HeuremaError>
+where
+    T: DeserializeOwned,
+{
+    let header: SnapshotHeader = serde_json::from_slice(bytes).map_err(decode_error)?;
+    validate_header(header.format_version, header.family, expected)?;
+    serde_json::from_slice::<SnapshotEnvelope<T>>(bytes)
+        .map_err(decode_error)?
+        .into_payload(expected)
 }
 
 /// WHY: Persistence remains outside HNSW and BM25 algorithms so consumers can
@@ -164,11 +208,15 @@ mod tests {
 
     #[test]
     fn unversioned_or_torn_bytes_cannot_decode_as_a_valid_envelope() {
-        let unversioned = br#"{\"config\":{},\"nodes\":{}}"#;
-        let torn = br#"{\"format_version\":1,\"family\":\"Vector\""#;
-        assert!(
-            serde_json::from_slice::<SnapshotEnvelope<serde_json::Value>>(unversioned).is_err()
-        );
-        assert!(serde_json::from_slice::<SnapshotEnvelope<serde_json::Value>>(torn).is_err());
+        let unversioned = br#"{"config":{},"nodes":{}}"#;
+        let torn = br#"{"format_version":1,"family":"Vector""#;
+        assert!(matches!(
+            decode_snapshot_payload::<serde_json::Value>(unversioned, SnapshotFamily::Vector),
+            Err(HeuremaError::Persistence { .. })
+        ));
+        assert!(matches!(
+            decode_snapshot_payload::<serde_json::Value>(torn, SnapshotFamily::Vector),
+            Err(HeuremaError::Persistence { .. })
+        ));
     }
 }

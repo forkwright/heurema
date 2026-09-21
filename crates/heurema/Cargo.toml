@@ -20,11 +20,9 @@ snafu = { workspace = true }
 # concrete index type satisfies the bound.
 serde = { workspace = true }
 
-# WHY dev-only: the library itself never encodes bytes (that's the adapter
-# crates' job); persistence_schema_closed.rs decodes hand-built JSON directly
-# to prove HnswIndex/Bm25Index close their schema at the type level,
-# independent of any adapter.
-[dev-dependencies]
+# WHY: `decode_snapshot_payload` owns the one JSON envelope-header parser used
+# by both persistence adapters, so version/family policy is checked before a
+# concrete engine deserializes its payload.
 serde_json = { workspace = true }
 
 [lints]
