@@ -991,10 +991,10 @@ mod tests {
 
     #[test]
     fn traversal_budget_bounds_an_empty_normal_link_cycle_and_upper_chain() {
+        const COUNT: u64 = 128;
         let mut config = HnswConfig::new(2);
         config.m_neighbours = 2;
         let mut index = HnswIndex::<u64>::new(config);
-        const COUNT: u64 = 128;
         for id in 0..COUNT {
             index.nodes.insert(
                 id,
