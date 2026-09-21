@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use heurema::{
-    Bm25Index, FtsConfig, HeuremaError, HnswConfig, HnswIndex, PersistenceBackend,
+    Bm25Index, FtsConfig, FtsIndex, HeuremaError, HnswConfig, HnswIndex, PersistenceBackend,
     PersistenceSource, TokenizerConfig, VectorDistance, VectorIndex,
 };
 use thesauros::ThesaurosBackend;
@@ -90,6 +90,28 @@ fn fts_index_survives_close_and_reopen() -> Result<(), HeuremaError> {
         &fts_config(),
         "the non-default tokenizer and filter list must survive a real close-and-reopen"
     );
+    Ok(())
+}
+
+#[test]
+fn populated_bm25_rankings_and_mutations_survive_close_and_reopen() -> Result<(), HeuremaError> {
+    let dir = tempfile::tempdir().map_err(io_error)?;
+    let mut original = Bm25Index::<u64>::new(FtsConfig::simple());
+    original.insert(1, "alpha alpha beta")?;
+    original.insert(2, "alpha gamma")?;
+    {
+        let backend = ThesaurosBackend::open(dir.path())?;
+        backend.save_fts_index("documents", &original)?;
+    }
+    let reopened = ThesaurosBackend::open(dir.path())?;
+    let mut restored: Bm25Index<u64> = reopened.load_fts_index("documents")?;
+    assert_eq!(original.query("alpha", 10)?, restored.query("alpha", 10)?);
+    for index in [&mut original, &mut restored] {
+        index.insert(1, "gamma gamma")?;
+        index.remove(&2)?;
+    }
+    assert_eq!(original.query("gamma", 10)?, restored.query("gamma", 10)?);
+    assert_eq!(original.len(), restored.len());
     Ok(())
 }
 

@@ -72,6 +72,24 @@ fn save_and_load_fts_index_round_trips_through_json_bytes() -> Result<(), Heurem
 }
 
 #[test]
+fn populated_bm25_snapshot_preserves_rankings_and_mutations() -> Result<(), HeuremaError> {
+    let backend = AtmisBackend::new();
+    let mut original = Bm25Index::<u64>::new(FtsConfig::simple());
+    original.insert(1, "alpha alpha beta")?;
+    original.insert(2, "alpha gamma")?;
+    backend.save_fts_index("documents", &original)?;
+    let mut restored: Bm25Index<u64> = backend.load_fts_index("documents")?;
+    assert_eq!(original.query("alpha", 10)?, restored.query("alpha", 10)?);
+    for index in [&mut original, &mut restored] {
+        index.insert(1, "gamma gamma")?;
+        index.remove(&2)?;
+    }
+    assert_eq!(original.query("gamma", 10)?, restored.query("gamma", 10)?);
+    assert_eq!(original.len(), restored.len());
+    Ok(())
+}
+
+#[test]
 fn load_vector_index_without_a_prior_save_is_index_not_found() {
     let backend = AtmisBackend::new();
 

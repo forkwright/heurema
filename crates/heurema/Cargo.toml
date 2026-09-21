@@ -37,5 +37,5 @@ workspace = true
 maturity = "alpha"
 since = "2026-05-25"
 phase = "1"
-phase-description = "scaffold + API + RRF; HNSW/FTS stubbed pending a fresh implementation"
+phase-description = "API + RRF + Simple BM25; HNSW stubbed pending a fresh implementation"
 exit-criteria = "Phase 2 HNSW + BM25 written fresh, with aletheia/krites as a behavioural reference and its tests as a conformance oracle; tracked at kanon/projects/heurema/ROADMAP.md"

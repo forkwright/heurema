@@ -22,11 +22,16 @@ struct DocumentTerms {
 
 /// An in-memory BM25 index for the configured `Simple` tokenizer pipeline.
 ///
+/// `Simple` splits on non-alphanumeric Unicode characters, lowercases each
+/// token with Rust Unicode lowercase mapping, and applies no accent folding
+/// or stop-word filtering. Queries use the same pipeline.
+///
 /// Documents retain their token counts while postings retain per-term document
 /// frequencies. Replacing or removing an ID first removes its old contribution,
 /// so a completed mutation always leaves those two views in agreement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(try_from = "RawBm25Index<Id>")]
 #[serde(bound(
     serialize = "Id: Serialize",
     deserialize = "Id: Ord + Deserialize<'de>"
@@ -36,6 +41,74 @@ pub struct Bm25Index<Id> {
     documents: BTreeMap<Id, DocumentTerms>,
     postings: BTreeMap<String, BTreeMap<Id, usize>>,
     total_document_terms: usize,
+}
+
+/// Snapshot bytes cross the same invariant boundary as index mutations.
+/// Derived postings and lengths must agree with the document term counts;
+/// accepting each field independently could silently change rankings on load.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[serde(bound(deserialize = "Id: Ord + Deserialize<'de>"))]
+struct RawBm25Index<Id> {
+    config: FtsConfig,
+    documents: BTreeMap<Id, DocumentTerms>,
+    postings: BTreeMap<String, BTreeMap<Id, usize>>,
+    total_document_terms: usize,
+}
+
+impl<Id: Ord> TryFrom<RawBm25Index<Id>> for Bm25Index<Id> {
+    type Error = &'static str;
+
+    fn try_from(raw: RawBm25Index<Id>) -> Result<Self, Self::Error> {
+        let mut total = 0usize;
+        let mut expected_postings: BTreeMap<&str, BTreeMap<&Id, usize>> = BTreeMap::new();
+        for (id, document) in &raw.documents {
+            let mut length = 0usize;
+            for (term, count) in &document.counts {
+                if term.is_empty() || *count == 0 {
+                    return Err("BM25 snapshot has an empty term or zero term frequency");
+                }
+                length = length
+                    .checked_add(*count)
+                    .ok_or("BM25 document length overflow")?;
+                expected_postings
+                    .entry(term)
+                    .or_default()
+                    .insert(id, *count);
+            }
+            if length != document.length {
+                return Err("BM25 document length disagrees with its term counts");
+            }
+            total = total
+                .checked_add(length)
+                .ok_or("BM25 corpus length overflow")?;
+        }
+        if total != raw.total_document_terms {
+            return Err("BM25 corpus length disagrees with its documents");
+        }
+        if raw.postings.len() != expected_postings.len()
+            || expected_postings.iter().any(|(term, expected)| {
+                raw.postings.get(*term).is_none_or(|actual| {
+                    actual.len() != expected.len()
+                        || expected
+                            .iter()
+                            .any(|(id, count)| actual.get(*id) != Some(count))
+                })
+            })
+        {
+            return Err("BM25 postings disagree with document term counts");
+        }
+        let index = Self {
+            config: raw.config,
+            documents: raw.documents,
+            postings: raw.postings,
+            total_document_terms: total,
+        };
+        if !index.documents.is_empty() && index.simple_pipeline().is_err() {
+            return Err("BM25 populated snapshot uses an unsupported analyzer");
+        }
+        Ok(index)
+    }
 }
 
 impl<Id> Bm25Index<Id> {
