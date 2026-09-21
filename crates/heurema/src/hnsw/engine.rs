@@ -1,5 +1,7 @@
 //! Safe in-memory HNSW graph for the published vector contract.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
 
@@ -22,9 +24,9 @@ struct Node<Id> {
     vector: Vec<f32>,
     level: usize,
     neighbours: Vec<BTreeSet<Id>>,
-    // A separate reciprocal base-layer tree. Normal HNSW links can be pruned
-    // to their degree limits; backbone links cannot, so local mutation never
-    // silently disconnects traversal from the entry component.
+    // A separate reciprocal base-layer cycle. Normal HNSW links can be pruned
+    // to their degree limits; the two backbone links cannot, so local mutation
+    // never silently disconnects traversal or create a high-degree hub.
     backbone: BTreeSet<Id>,
 }
 
@@ -46,6 +48,9 @@ pub struct HnswIndex<Id> {
     entry_point: Option<Id>,
     max_level: usize,
     level_state: u64,
+    #[cfg(test)]
+    #[serde(skip)]
+    distance_evaluations: Cell<usize>,
 }
 
 #[derive(Deserialize)]
@@ -112,14 +117,31 @@ impl<Id: Ord + Clone> TryFrom<RawHnswIndex<Id>> for HnswIndex<Id> {
             }
         }
         if !raw.nodes.is_empty() {
+            let expected_degree = match raw.nodes.len() {
+                1 => 0,
+                2 => 1,
+                _ => 2,
+            };
+            if raw
+                .nodes
+                .values()
+                .any(|node| node.backbone.len() != expected_degree)
+            {
+                return Err("HNSW snapshot backbone does not have its bounded cycle degree");
+            }
+            let expected_edges = match raw.nodes.len() {
+                1 => 0,
+                2 => 1,
+                count => count,
+            };
             let edges = raw
                 .nodes
                 .values()
                 .map(|node| node.backbone.len())
                 .sum::<usize>()
                 / 2;
-            if edges != raw.nodes.len() - 1 {
-                return Err("HNSW snapshot backbone is not a tree");
+            if edges != expected_edges {
+                return Err("HNSW snapshot backbone is not a cycle");
             }
             let Some(start) = raw.nodes.keys().next().cloned() else {
                 return Err("HNSW snapshot has no backbone root");
@@ -141,6 +163,8 @@ impl<Id: Ord + Clone> TryFrom<RawHnswIndex<Id>> for HnswIndex<Id> {
             entry_point: raw.entry_point,
             max_level: raw.max_level,
             level_state: raw.level_state,
+            #[cfg(test)]
+            distance_evaluations: Cell::new(0),
         })
     }
 }
@@ -158,6 +182,8 @@ impl<Id> HnswIndex<Id> {
             // a given mutation history without coupling duplicate vectors to
             // a shared level.
             level_state: 0x9e37_79b9_7f4a_7c15,
+            #[cfg(test)]
+            distance_evaluations: Cell::new(0),
         }
     }
 
@@ -196,6 +222,9 @@ where
     Id: Ord + Hash + Clone,
 {
     fn distance(&self, left: &[f32], right: &[f32]) -> f64 {
+        #[cfg(test)]
+        self.distance_evaluations
+            .set(self.distance_evaluations.get().saturating_add(1));
         match self.config.distance {
             VectorDistance::L2 => left
                 .iter()
@@ -397,6 +426,36 @@ where
         }
     }
 
+    fn disconnect_backbone(&mut self, left: &Id, right: &Id) {
+        if let Some(node) = self.nodes.get_mut(left) {
+            node.backbone.remove(right);
+        }
+        if let Some(node) = self.nodes.get_mut(right) {
+            node.backbone.remove(left);
+        }
+    }
+
+    fn splice_backbone(&mut self, id: &Id, anchor: &Id) {
+        let neighbours: Vec<Id> = self.nodes[anchor].backbone.iter().cloned().collect();
+        match neighbours.as_slice() {
+            // The first insertion was the singleton cycle. The second forms
+            // its single undirected edge; every later insertion splices one
+            // deterministic edge, keeping all backbone degrees at most two.
+            [] => self.connect_backbone(id, anchor),
+            // A two-node undirected cycle has one stored edge. Preserve it
+            // while adding the third side of the first true simple cycle.
+            [successor] => {
+                self.connect_backbone(anchor, id);
+                self.connect_backbone(id, successor);
+            }
+            [successor, ..] => {
+                self.disconnect_backbone(anchor, successor);
+                self.connect_backbone(anchor, id);
+                self.connect_backbone(id, successor);
+            }
+        }
+    }
+
     fn remove_node(&mut self, id: &Id) {
         let Some(node) = self.nodes.remove(id) else {
             return;
@@ -424,19 +483,16 @@ where
                 }
             }
         }
-        // The backbone is a tree. Removing one vertex splits only the local
-        // incident subtrees; chaining those neighbours reconnects them without
-        // a graph-wide component scan or exceeding normal HNSW degree bounds.
+        // Bypass the removed vertex in the reciprocal cycle. This is O(1): a
+        // valid backbone has at most two incident edges at every size.
         let anchors: Vec<Id> = node.backbone.into_iter().collect();
         for anchor in &anchors {
             if let Some(other) = self.nodes.get_mut(anchor) {
                 other.backbone.remove(id);
             }
         }
-        if let Some(first) = anchors.first() {
-            for other in anchors.iter().skip(1) {
-                self.connect_backbone(first, other);
-            }
+        if let [left, right] = anchors.as_slice() {
+            self.connect_backbone(left, right);
         }
         self.reselect_entry();
     }
@@ -468,10 +524,10 @@ where
             self.reselect_entry();
             return Ok(());
         };
-        // Normal links are degree-pruned HNSW shortcuts. The separate
-        // backbone edge is never pruned and therefore keeps the entry
-        // component traversable through insertion, replacement, and removal.
-        self.connect_backbone(&id, &entry);
+        // Normal links are degree-pruned HNSW shortcuts. The separate cycle
+        // edge is never pruned and splices locally, preserving a bounded base
+        // traversal through insertion, replacement, and removal.
+        self.splice_backbone(&id, &entry);
         for current_level in ((level + 1)..=self.max_level).rev() {
             entry = self.greedy_at_level(vector, entry, current_level);
         }
@@ -551,6 +607,16 @@ where
         // the default M=16 graph enough frontier to meet the pinned recall
         // fixture without borrowing `ef_construction` as query policy.
         k.max(self.config.m_neighbours.saturating_mul(8)).max(1)
+    }
+
+    #[cfg(test)]
+    fn reset_distance_evaluations(&self) {
+        self.distance_evaluations.set(0);
+    }
+
+    #[cfg(test)]
+    fn distance_evaluations(&self) -> usize {
+        self.distance_evaluations.get()
     }
 }
 
@@ -685,6 +751,15 @@ mod tests {
             .insert(entry, &[0.07, 0.19, 0.31, 0.43])
             .expect("entry replacement reconnects through a surviving entry");
         assert_base_reachable(&index);
+        assert!(
+            index.nodes.values().all(|node| node.backbone.len() == 2),
+            "replacement must retain a degree-two cycle: {:?}",
+            index
+                .nodes
+                .iter()
+                .map(|(id, node)| (*id, node.backbone.len()))
+                .collect::<Vec<_>>()
+        );
         let restored: HnswIndex<u64> =
             serde_json::from_slice(&serde_json::to_vec(&index).expect("serializable reanchor"))
                 .expect("reanchored snapshot reopens");
@@ -700,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_backbone_articulation_reanchors_every_local_component() {
+    fn deleting_a_backbone_cycle_vertex_rejoins_its_two_local_neighbours() {
         let mut index = HnswIndex::<u64>::new(HnswConfig::new(2));
         for id in 0..4 {
             index.nodes.insert(
@@ -713,9 +788,10 @@ mod tests {
                 },
             );
         }
-        for id in 1..4 {
-            index.connect_backbone(&0, &id);
-        }
+        index.connect_backbone(&0, &1);
+        index.connect_backbone(&1, &2);
+        index.connect_backbone(&2, &3);
+        index.connect_backbone(&3, &0);
         index.reselect_entry();
         index.remove(&0).expect("removal is valid");
         assert_base_reachable(&index);
@@ -726,6 +802,53 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
         assert_eq!(result_ids.first(), Some(&3));
+    }
+
+    #[test]
+    fn duplicate_vectors_keep_fixed_k_query_distance_work_bounded_as_corpus_grows() {
+        fn build(count: u64) -> HnswIndex<u64> {
+            let mut config = HnswConfig::new(4);
+            config.m_neighbours = 2;
+            config.ef_construction = 8;
+            let mut index = HnswIndex::new(config);
+            for id in 0..count {
+                index
+                    .insert(id, &[1.0, 1.0, 1.0, 1.0])
+                    .expect("duplicate finite vector");
+            }
+            index
+        }
+
+        let small = build(32);
+        let large = build(512);
+        assert!(
+            large.nodes.values().all(|node| node.backbone.len() <= 2),
+            "the persistent guard must never form an entry hub"
+        );
+        let small_entry = small.entry_point;
+        let large_entry = large.entry_point;
+        small.reset_distance_evaluations();
+        small.query(&[1.0, 1.0, 1.0, 1.0], 4).expect("query");
+        let small_work = small.distance_evaluations();
+        large.reset_distance_evaluations();
+        large.query(&[1.0, 1.0, 1.0, 1.0], 4).expect("query");
+        let large_work = large.distance_evaluations();
+        assert_eq!(
+            small.entry_point, small_entry,
+            "query does not mutate its entry"
+        );
+        assert_eq!(
+            large.entry_point, large_entry,
+            "query does not mutate its entry"
+        );
+        assert!(
+            large_work <= 4_096,
+            "fixed M/k query must inspect a bounded graph frontier, got {large_work} distances"
+        );
+        assert!(
+            large_work <= small_work.saturating_mul(5),
+            "16x duplicate corpus must retain sublinear fixed-M/k query work: {small_work} -> {large_work}"
+        );
     }
 
     #[test]
