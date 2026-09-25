@@ -331,8 +331,10 @@ where
 /// `members` in ascending identity order.
 ///
 /// WHY: every per-member check walks this order, so which member a refusal
-/// names does not depend on the order the caller listed them in.
-fn sorted_members<M: Ord, P>(members: &[IndexMember<M, P>]) -> Vec<&IndexMember<M, P>> {
+/// names does not depend on the order the caller listed them in; building a
+/// version applies members in the same order, so the engine a batch builds
+/// does not depend on it either.
+pub(super) fn sorted_members<M: Ord, P>(members: &[IndexMember<M, P>]) -> Vec<&IndexMember<M, P>> {
     let mut sorted: Vec<&IndexMember<M, P>> = members.iter().collect();
     sorted.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     sorted

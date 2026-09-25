@@ -9,8 +9,12 @@ source_docs = [
 
 [state]
 summary = "Phase 01 is complete: fresh HNSW (an in-memory navigable graph) and BM25 (the Simple pipeline) implement VectorIndex and FtsIndex, BM25 matches an independently written formula reference, the conformance oracle runs every case live, and both persistence adapters (atmis, thesauros) store versioned per-index snapshot envelopes. Reciprocal-rank fusion is implemented. Snapshots are whole-index saves, not transactions; Phase 02 adds the durable retrieval lifecycle, and the akolouthia Datalog engine (Phase 03) is not yet built. krites is behavioural reference and conformance oracle only, never a code source."
-current_phase = "Phase 01 fresh retrieval engines complete (BM25 #48, HNSW #50, versioned snapshots #51, independent BM25 formula oracle); Phase 02 durable retrieval lifecycle in progress (lifecycle type vocabulary, pre-publish validation, and LifecycleBackend storage layer landed; driver and recovery next)"
+current_phase = "Phase 01 fresh retrieval engines complete (BM25 #48, HNSW #50, versioned snapshots #51, independent BM25 formula oracle); Phase 02 durable retrieval lifecycle in progress (lifecycle type vocabulary, pre-publish validation, LifecycleBackend storage layer, and the IndexLifecycle stage-and-publish driver landed; recovery next)"
 updated = "2026-09-25"
+
+[[recent]]
+date = "2026-09-25"
+item = "Phase 02 lifecycle driver: heurema::IndexLifecycle validates each operation (stateless check with no backend call, replay lookup by key and digest, head read and permission, staged-state check), builds the successor version in memory, stages its payload and marker, and publishes head, operation record, and marker removal in one atomic backend write. Reads resolve the head and then the immutable payload it names, so a staged version is never readable; PublishedIndex hits carry identity, provenance, and version. Records are private serde_json encodings with format_version; undecodable bytes are CorruptSnapshot, a newer format UnsupportedSnapshotVersion. crates/thesauros/tests/lifecycle_conformance.rs runs every case on atmis and a tempdir thesauros: interruption before and after the publish point across fjall reopen, injected failures before and after each write, zero-write refusal proofs through a counting backend, replay and conflict across reopen, orphan staged state blocking its index (Destroy included), and two lifecycles racing over one backend. Every published payload is retained until destroy (storage growth); recovery comes next."
 
 [[recent]]
 date = "2026-09-25"

@@ -173,6 +173,15 @@ impl<Id> Bm25Index<Id> {
     fn simple_pipeline(&self) -> Result<(), HeuremaError> {
         require_simple_pipeline(&self.config)
     }
+
+    /// The identities of every indexed document, in ascending order.
+    ///
+    /// WHY: a lifecycle version payload pairs this engine with a member
+    /// table, and its decoder refuses a payload whose engine holds a member
+    /// the table does not name, or the reverse.
+    pub(crate) fn member_ids(&self) -> impl Iterator<Item = &Id> {
+        self.documents.keys()
+    }
 }
 
 /// Refuses any analyzer pipeline other than the argument-less `Simple`

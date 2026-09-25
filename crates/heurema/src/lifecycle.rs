@@ -1,6 +1,8 @@
-//! The durable retrieval lifecycle's vocabulary: which index an operation
-//! names, what it asks to change, and which state the index is in; and the
-//! pre-publish validation that refuses an invalid operation before any write.
+//! The durable retrieval lifecycle: its vocabulary (which index an operation
+//! names, what it asks to change, and which state the index is in), the
+//! pre-publish validation that refuses an invalid operation before any write,
+//! and the driver, [`IndexLifecycle`], that stages each operation's version
+//! and publishes it at one atomic point.
 //!
 //! WHY: the lifecycle contract has to be readable from types before any
 //! durable write depends on it. A consumer can tell from these types alone
@@ -74,26 +76,66 @@
 //! (stage, publish, destroy, quarantine), each atomic and durable before it
 //! returns. The backend enforces only structural rules (compare-and-set on
 //! the head, never overwriting, refusing while staged state exists); it
-//! decodes nothing.
+//! decodes nothing. heurēma owns every encoding: a head names the index's
+//! [`IndexRecord`], a version payload holds one version's engine and its
+//! member table ([`MemberEntry`] per member: provenance, introducing
+//! version, superseded version), a staging marker names the operation that
+//! staged a version, and an operation record keeps a published operation's
+//! outcome and every member it changed ([`MemberChange`]).
 //!
 //! `atmis` and `thesauros` implement it. `atmis` applies each write under
 //! one mutex over all five maps. `thesauros` commits each write as one fjall
 //! write batch with `PersistMode::SyncAll`, which fjall journals as one
-//! checksummed unit and replays only whole, so a crash leaves all of a write
-//! or none of it.
+//! checksummed unit, fsyncs, and replays only whole on reopen, so a crash
+//! leaves all of a write or none of it. That journal property is relied on,
+//! not simulated: the tests stop an operation between writes, never inside
+//! one.
 //!
-//! A version staged but never published is orphan staged state. It blocks
-//! staging and destroying its index until recovery (Phase 02 Slice 4) moves
-//! it to quarantine; nothing clears it before then, and nothing deletes it.
+//! `PersistenceBackend` and its whole-index snapshots are unchanged and
+//! separate: a snapshot is a single save, not a lifecycle version, and the
+//! two never share keys.
+//!
+//! # Publishing and reading
+//!
+//! [`IndexLifecycle`] runs every operation in one order: stateless checks,
+//! replay lookup by key and digest, head read and permission, staged-state
+//! check, an in-memory build of the successor version, stage, publish. The
+//! checks write nothing, so a refused operation leaves storage as it was,
+//! and a stateless refusal makes no backend call at all.
+//!
+//! The publish point is one atomic backend write. Before it, readers see
+//! the old version; after it, they see the new head, the operation record,
+//! and the staging marker's removal together. The version payload was
+//! already durable from the stage but unreachable, because a reader resolves
+//! the head first and then reads only the immutable payload the head names.
+//! A reader therefore sees all of one version or all of the next, and never
+//! a staged one. No version is published without its member identities and
+//! provenance: the payload decoder refuses an engine whose members differ
+//! from its member table.
+//!
+//! The same key with the same digest replays the recorded outcome and writes
+//! nothing; the same key with another digest is refused with
+//! [`HeuremaError::OperationConflict`](crate::HeuremaError::OperationConflict).
+//! Only published operations are recorded, so an interrupted or refused one
+//! can be retried under its key.
+//!
+//! A version staged but never published is orphan staged state. It refuses
+//! every mutation of its index, Create and Destroy included, with
+//! [`HeuremaError::StagedStateExists`](crate::HeuremaError::StagedStateExists)
+//! until recovery moves it to quarantine; other indexes are unaffected.
+//! Recovery on open lands in a later Phase 02 change; nothing clears orphan
+//! staged state before then, and nothing ever deletes it.
 //!
 //! # Limits
 //!
-//! Snapshots are not transactions. This module does not yet drive the
-//! lifecycle: nothing here encodes a head, payload, marker, or operation
-//! record. Validation and the digest are pure functions of the operation and
-//! the record the caller supplies; the driver that stages and publishes a
-//! validated operation through a [`LifecycleBackend`] lands in a later
-//! Phase 02 change.
+//! - Every published version payload is retained until the index is
+//!   destroyed, so storage grows with every operation. Pruning superseded
+//!   payloads needs a retention decision and is not implemented.
+//! - Each operation decodes the active version's payload and applies its
+//!   change to that copy, so its cost grows with the index's size.
+//! - Destroy removes every version payload in its one atomic write, and
+//!   keeps the head and every operation record, so the destroyed index stays
+//!   explainable.
 //!
 //! # Example
 //!
@@ -150,11 +192,15 @@
 //! # Ok::<(), heurema::HeuremaError>(())
 //! ```
 
+mod apply;
 mod backend;
 mod digest;
+mod driver;
+mod encoding;
 mod identity;
 mod member;
 mod operation;
+mod published;
 mod record;
 mod validate;
 
@@ -173,6 +219,10 @@ pub use member::{
 pub use operation::{IndexChange, IndexConfig, LifecycleOperation, LifecycleTransition};
 pub use record::{IndexRecord, IndexState, IndexStateKind};
 pub use validate::{CheckedOperation, ValidatedOperation};
+
+pub use apply::MemberChange;
+pub use driver::{IndexLifecycle, Preparation, Prepared, PublishReceipt, Staged};
+pub use published::{IndexHit, MemberEntry, PublishedIndex};
 
 /// Opaque stand-ins for consumer types, shared by this module's unit tests.
 #[cfg(test)]

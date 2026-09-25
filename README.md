@@ -52,9 +52,10 @@ index and the records it was built from, become visible together.
 Phase 01 (fresh HNSW and BM25 engines, each checked against an independent oracle) is complete.
 Phase 02, the durable retrieval lifecycle (named indexes, staged writes, one atomic publish point,
 recovery, and deletion rules), is in progress: its type vocabulary and pre-publish validation
-(`heurema::lifecycle`) and its storage layer (`LifecycleBackend`, implemented by both adapters) have
-landed; the driver that stages and publishes operations, and recovery on reopen, follow. The Datalog
-engine `akolouthia` comes after it. CLAUDE.md's Roadmap carries the phase list.
+(`heurema::lifecycle`), its storage layer (`LifecycleBackend`, implemented by both adapters), and the
+driver that stages each operation's version and publishes it at one atomic point (`IndexLifecycle`)
+have landed; recovery on reopen follows. The Datalog engine `akolouthia` comes after it. CLAUDE.md's
+Roadmap carries the phase list.
 
 ## API surface
 
@@ -77,7 +78,8 @@ use thesauros::ThesaurosBackend;
 - `SnapshotEnvelope` / `SnapshotFamily` / `decode_snapshot_payload` - the versioned per-index snapshot format both adapters share.
 - `rrf` / `rrf_with_default` - reciprocal-rank fusion with the paper-standard `k = 60`.
 - `lifecycle` - the Phase 02 durable-lifecycle vocabulary and its pre-publish validation: `IndexIdentity` (`OwnerNamespace` plus `IndexName`), `OperationKey` / `OperationIdentity` / `OperationDigest`, `IndexVersion`, `LifecycleOperation` / `IndexChange` / `LifecycleTransition`, `IndexRecord` / `IndexState`, and the `MemberIdentity` / `ProvenanceReference` / `RetentionReference` marker traits a consumer implements on its own types. `CheckedOperation::check` refuses an invalid operation without any index state and computes its digest (SHA-256 over a canonical encoding documented on `OperationDigest`); `CheckedOperation::permit` applies the permission table (`LifecycleTransition::is_permitted_from`) and the checks against the current record, yielding a `ValidatedOperation`. Both are pure functions. `HeuremaError::category()` sorts every error into an `ErrorCategory`.
-- `LifecycleBackend` - the lifecycle's storage contract: object safe, opaque heurēma-encoded bytes under one `storage_key` grammar, and four writes (stage, publish, destroy, quarantine), each atomic and durable before `Ok`. Writes compare-and-set against the head they were computed from, never overwrite a stored payload or operation record, and refuse while an index holds interrupted staged state. `AtmisBackend` applies each write under one mutex; `ThesaurosBackend` commits each as one fjall write batch with `PersistMode::SyncAll`. No driver uses it yet.
+- `LifecycleBackend` - the lifecycle's storage contract: object safe, opaque heurēma-encoded bytes under one `storage_key` grammar, and four writes (stage, publish, destroy, quarantine), each atomic and durable before `Ok`. Writes compare-and-set against the head they were computed from, never overwrite a stored payload or operation record, and refuse while an index holds interrupted staged state. `AtmisBackend` applies each write under one mutex; `ThesaurosBackend` commits each as one fjall write batch with `PersistMode::SyncAll`.
+- `IndexLifecycle` - the lifecycle driver over any `LifecycleBackend`. `apply` runs the stateless checks, a replay lookup by key and digest, the permission and state checks, and an in-memory build of the next version, then stages that version and publishes it in one atomic write of the new head, the operation record, and the staging marker's removal; `prepare`, `Prepared::stage`, and `Staged::publish` run the same steps one at a time. A refused operation writes nothing, and one refused by a stateless check makes no backend call. The same key with the same content replays the recorded `PublishReceipt`; with other content it is `OperationConflict`. `index` returns the active version as a `PublishedIndex` whose members carry their `MemberEntry` (provenance, introducing version, superseded version) and whose `query_vector` / `query_text` return `IndexHit`s carrying identity, provenance, and version; a staged version is never readable. A version staged and never published refuses every later mutation of its index until recovery, which a later Phase 02 change adds. Every published version payload is kept until destroy, so storage grows with each operation.
 
 The index API is engine-agnostic: heurēma knows nothing about SQL or any consumer-owned query language,
 and it returns IDs and scores rather than consumer tuples.

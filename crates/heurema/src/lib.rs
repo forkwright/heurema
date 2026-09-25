@@ -46,6 +46,10 @@ pub use lifecycle::{
     DestroyWrite, LIFECYCLE_FORMAT_VERSION, LifecycleBackend, PublishWrite, QuarantineWrite,
     QuarantinedEntry, StageWrite, StagedEntry,
 };
+pub use lifecycle::{
+    IndexHit, IndexLifecycle, MemberChange, MemberEntry, Preparation, Prepared, PublishReceipt,
+    PublishedIndex, Staged,
+};
 pub use persistence::{
     PersistenceBackend, SNAPSHOT_FORMAT_VERSION, SnapshotEnvelope, SnapshotFamily,
     decode_snapshot_payload,

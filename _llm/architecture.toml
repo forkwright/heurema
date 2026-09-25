@@ -9,7 +9,7 @@ source_docs = [
 ]
 
 [architecture]
-summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. The workspace holds the traits-and-engines crate (heurema: HNSW, BM25, RRF, snapshot envelope) and its PersistenceBackend adapter siblings (atmis, thesauros)."
+summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. The workspace holds the traits-and-engines crate (heurema: HNSW, BM25, RRF, snapshot envelope, and the durable index lifecycle) and its PersistenceBackend and LifecycleBackend adapter siblings (atmis, thesauros)."
 layers = [
   "public-api",
   "errors",
@@ -20,12 +20,13 @@ layers = [
   "rank-fusion",
   "lifecycle-vocabulary",
   "lifecycle-validation",
+  "lifecycle-driver",
 ]
 
 [[architecture.crates]]
 name = "heurema"
 path = "crates/heurema"
-role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary and pre-publish validation (lifecycle module: identities, operations, transitions, index record, CheckedOperation / ValidatedOperation, the canonical OperationDigest; pure functions) and its storage contract (LifecycleBackend, storage_key), and the workspace error chain with its ErrorCategory classification."
+role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary and pre-publish validation (lifecycle module: identities, operations, transitions, index record, CheckedOperation / ValidatedOperation, the canonical OperationDigest; pure functions), its storage contract (LifecycleBackend, storage_key), and its driver (IndexLifecycle: stage and atomic publish over private serde_json record encodings, PublishedIndex reads), and the workspace error chain with its ErrorCategory classification."
 
 [[architecture.crates]]
 name = "atmis"
@@ -192,3 +193,27 @@ crate = "heurema"
 kind = "type"
 name = "OperationDigest"
 purpose = "SHA-256 over the domain prefix heurema.lifecycle.operation.v1 and the operation's canonical encoding, written by a private serde serializer with a fixed byte grammar documented on the type: sorted map entries, string or integer keys only, floats refused in consumer types, vector components as f32 bit patterns, members sorted by identity, the key not hashed."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "IndexLifecycle"
+purpose = "The lifecycle driver over any LifecycleBackend. apply(operation) runs, in order: CheckedOperation::check (no backend call), replay lookup by (index, key) (same digest returns the recorded PublishReceipt with replayed set and writes nothing; another digest is OperationConflict), head read and permit, the staged-state check (any staging marker refuses every mutation of the index with StagedStateExists, Create and Destroy included), an in-memory build of the successor version (members in ascending identity order; Rebuild from an empty engine), stage (payload plus marker, head compare-and-set), and publish (one atomic write of head, operation record, and marker removal; Destroy writes its destroyed head and removes every payload instead). prepare / Prepared::stage / Staged::publish expose the steps. record() reads the head; index() reads the head then only the payload it names, so a staged version is never readable. open() does not recover yet: orphan staged state blocks its index until a later Phase 02 change adds recovery."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "PublishedIndex"
+purpose = "One published version read whole: version, config, member table (MemberEntry per member: provenance, introducing version, superseded version), and query_vector / query_text returning IndexHit values that carry identity, score, provenance, and version. FamilyMismatch when the query's family differs from the index's."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "PublishReceipt"
+purpose = "Outcome of a published or replayed operation: index, OperationIdentity, transition, the resulting IndexState (on a replay, the state recorded at first publish), and whether it was a replay."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "MemberChange"
+purpose = "Audit linkage of one member in an operation record (Inserted, Replaced, Removed, AbsentOnRemove, Dropped, Retired), carrying the displaced MemberEntry whole. Stored in every operation record now; the read API arrives in a later Phase 02 change without a format change."

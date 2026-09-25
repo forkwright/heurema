@@ -27,10 +27,10 @@ fjall = { workspace = true }
 # per-crate dev-dependency instead of a workspace-level entry.
 [dev-dependencies]
 tempfile = "3"
-# WHY: tests/lifecycle_backend.rs is one LifecycleBackend conformance suite
-# that runs every case against both adapters, the in-memory atmis and this
-# durable one; it lives here because only this crate can also prove the
-# reopen half.
+# WHY: tests/lifecycle_backend.rs (the LifecycleBackend contract) and
+# tests/lifecycle_conformance.rs (the IndexLifecycle driver over it) each run
+# every case against both adapters, the in-memory atmis and this durable one;
+# they live here because only this crate can also prove the reopen half.
 atmis = { workspace = true }
 
 [lints]

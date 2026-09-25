@@ -89,8 +89,8 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 /// [`HeuremaError::StagedStateExists`]; other indexes are unaffected. Only
 /// recovery clears it, by moving it to quarantine through
 /// [`quarantine`](LifecycleBackend::quarantine); nothing ever deletes it.
-/// Recovery arrives with the lifecycle driver's reopen path (Phase 02 Slice
-/// 4); until then an orphan blocks its index.
+/// Recovery arrives with the lifecycle driver's reopen path in a later
+/// Phase 02 change; until then an orphan blocks its index.
 ///
 /// The methods after [`destroy`](LifecycleBackend::destroy) serve recovery
 /// and audit. They are declared together with the rest so a later recovery
