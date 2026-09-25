@@ -43,6 +43,16 @@
 //! later write returns [`HeuremaError::Persistence`]. The caller must drop
 //! this backend and [`open`](ThesaurosBackend::open) the path again; the
 //! failed batch is then either fully replayed or absent.
+//!
+//! # Limits
+//!
+//! fjall stores values of at most 4294967295 bytes (4 GiB). A lifecycle
+//! write whose value (a version payload, which holds one index's whole
+//! engine and member table as JSON, a staging marker, a head, or an
+//! operation record) is larger is refused with
+//! [`HeuremaError::Persistence`] before anything is written. Keys need no
+//! such check: the identifier limits bound every key far below fjall's key
+//! limit.
 
 #![deny(missing_docs)]
 
@@ -109,6 +119,13 @@ struct CommitLockPoisoned;
 /// The quarantine counter reached `u64::MAX`.
 #[derive(Debug)]
 struct QuarantineSequenceExhausted;
+
+/// A lifecycle value larger than fjall stores.
+#[derive(Debug)]
+struct OversizedValue {
+    what: &'static str,
+    len: usize,
+}
 
 /// A quarantine keyspace entry that does not pair with its marker.
 #[derive(Debug)]
@@ -220,6 +237,26 @@ impl ThesaurosBackend {
         match self.commit_lock.lock() {
             Ok(guard) => Ok(guard),
             Err(_poisoned) => Err(persistence(CommitLockPoisoned)),
+        }
+    }
+
+    /// Refuses a value fjall cannot store, before the commit lock is taken
+    /// or any batch is built.
+    ///
+    /// WHY: fjall's `batch::item::Item::new` asserts that a value's length
+    /// fits in a `u32`. That panic would unwind out of the write while it
+    /// holds the commit lock and poison it, refusing every later lifecycle
+    /// write until reopen, where this returns a typed error instead.
+    ///
+    /// INVARIANT: keys need no check. The identifier limits bound every key
+    /// to at most 64 + 1 + 128 + 1 + 128 = 322 bytes (an operation key), far
+    /// below fjall's 65535-byte key limit.
+    #[track_caller]
+    fn refuse_oversized(what: &'static str, len: usize) -> Result<(), HeuremaError> {
+        if u32::try_from(len).is_err() {
+            Err(persistence(OversizedValue { what, len }))
+        } else {
+            Ok(())
         }
     }
 
@@ -477,6 +514,8 @@ impl LifecycleBackend for ThesaurosBackend {
         let version_key = storage_key::version(write.index, write.version);
         let staging_key = storage_key::staging(write.index, write.version);
         let operation_key = storage_key::operation(write.index, write.key);
+        Self::refuse_oversized("version payload", write.payload.len())?;
+        Self::refuse_oversized("staging marker", write.marker.len())?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -496,6 +535,8 @@ impl LifecycleBackend for ThesaurosBackend {
         let version_key = storage_key::version(write.index, write.version);
         let staging_key = storage_key::staging(write.index, write.version);
         let operation_key = storage_key::operation(write.index, write.key);
+        Self::refuse_oversized("head record", write.head.len())?;
+        Self::refuse_oversized("operation record", write.operation.len())?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -521,6 +562,8 @@ impl LifecycleBackend for ThesaurosBackend {
         let head_key = storage_key::head(write.index);
         let prefix = storage_key::index_prefix(write.index);
         let operation_key = storage_key::operation(write.index, write.key);
+        Self::refuse_oversized("head record", write.head.len())?;
+        Self::refuse_oversized("operation record", write.operation.len())?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -579,6 +622,9 @@ impl LifecycleBackend for ThesaurosBackend {
     fn quarantine(&self, write: QuarantineWrite<'_>) -> Result<(), HeuremaError> {
         let version_key = storage_key::version(write.index, write.version);
         let staging_key = storage_key::staging(write.index, write.version);
+        // NOTE: the payload moved beside the marker is already stored, so it
+        // fits; only the marker bytes come from the caller.
+        Self::refuse_oversized("staging marker", write.marker.len())?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -742,6 +788,19 @@ impl fmt::Display for QuarantineSequenceExhausted {
 
 impl std::error::Error for QuarantineSequenceExhausted {}
 
+impl fmt::Display for OversizedValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "thesauros cannot store a {} of {} bytes: fjall stores values of at most 4294967295 \
+             bytes; nothing was written",
+            self.what, self.len
+        )
+    }
+}
+
+impl std::error::Error for OversizedValue {}
+
 impl fmt::Display for UnpairedQuarantineEntry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -800,6 +859,27 @@ mod tests {
             backend.read_staging(&index).expect("reads take no lock"),
             None,
             "the refused stage wrote nothing"
+        );
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn values_fjall_cannot_store_are_refused_before_any_write() {
+        // WHY the function, not a write: a 4 GiB value is not allocated in a
+        // unit test; every write calls this before it takes the commit lock.
+        let largest = u32::MAX as usize;
+        ThesaurosBackend::refuse_oversized("version payload", largest)
+            .expect("fjall stores a value of u32::MAX bytes");
+        let error = ThesaurosBackend::refuse_oversized("version payload", largest + 1)
+            .expect_err("a value one byte past the limit is refused");
+        assert!(
+            matches!(error, HeuremaError::Persistence { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "persistence backend error: thesauros cannot store a version payload of 4294967296 \
+             bytes: fjall stores values of at most 4294967295 bytes; nothing was written"
         );
     }
 }

@@ -137,6 +137,11 @@
 //! - Destroy removes every version payload in its one atomic write, and
 //!   keeps the head and every operation record, so the destroyed index stays
 //!   explainable.
+//! - `thesauros` stores a lifecycle value of at most 4 GiB. A version
+//!   payload holds one index's whole engine and member table as JSON, so a
+//!   large enough index is refused with
+//!   [`HeuremaError::Persistence`](crate::HeuremaError::Persistence) before
+//!   anything is written.
 //!
 //! # Example
 //!

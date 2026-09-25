@@ -78,6 +78,9 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 ///   deciding what to do. After a failed `thesauros` commit the fjall
 ///   database refuses further writes until the backend is reopened, and
 ///   until then its reads may also miss a write that reached the journal.
+/// - An adapter may refuse a value larger than it can store with
+///   [`HeuremaError::Persistence`], before writing anything (`thesauros`:
+///   4 GiB per value).
 ///
 /// # Atomicity basis
 ///
@@ -111,7 +114,9 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 ///
 /// Every method returns [`HeuremaError::Persistence`] when the backend
 /// cannot read or write, and [`HeuremaError::CorruptSnapshot`] when a stored
-/// key does not follow the [`storage_key`] grammar.
+/// key does not follow the [`storage_key`] grammar. A write also returns
+/// [`HeuremaError::Persistence`], having written nothing, for a value larger
+/// than the adapter can store (`thesauros`: 4 GiB).
 ///
 /// WHY object safe: a lifecycle is chosen at runtime (durable or in-memory,
 /// or a test wrapper that injects faults), so `&dyn LifecycleBackend`,
