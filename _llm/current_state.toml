@@ -8,9 +8,13 @@ source_docs = [
 ]
 
 [state]
-summary = "Phase 01 landed: fresh HNSW (an in-memory navigable graph) and BM25 (the Simple pipeline) implement VectorIndex and FtsIndex, the conformance oracle runs every case live, and both persistence adapters (atmis, thesauros) store versioned per-index snapshot envelopes. Reciprocal-rank fusion is implemented. Snapshots are whole-index saves, not transactions; Phase 02 adds the durable retrieval lifecycle, and the akolouthia Datalog engine (Phase 03) is not yet built. krites is behavioural reference and conformance oracle only, never a code source."
-current_phase = "Phase 01 fresh retrieval engines landed (BM25 #48, HNSW #50, versioned snapshots #51); its open exit item is an independently written BM25 formula reference; Phase 02 durable retrieval lifecycle follows"
+summary = "Phase 01 is complete: fresh HNSW (an in-memory navigable graph) and BM25 (the Simple pipeline) implement VectorIndex and FtsIndex, BM25 matches an independently written formula reference, the conformance oracle runs every case live, and both persistence adapters (atmis, thesauros) store versioned per-index snapshot envelopes. Reciprocal-rank fusion is implemented. Snapshots are whole-index saves, not transactions; Phase 02 adds the durable retrieval lifecycle, and the akolouthia Datalog engine (Phase 03) is not yet built. krites is behavioural reference and conformance oracle only, never a code source."
+current_phase = "Phase 01 fresh retrieval engines complete (BM25 #48, HNSW #50, versioned snapshots #51, independent BM25 formula oracle); Phase 02 durable retrieval lifecycle next"
 updated = "2026-09-25"
+
+[[recent]]
+date = "2026-09-25"
+item = "Independent BM25 formula oracle (tests/oracle/bm25_formula.rs): an f64 reference recomputed from the raw live corpus must match Bm25Index ID for ID within a derived f32 bound on seeded insert/replace/remove workloads; every perturbed reference is caught. The Bm25Index rustdoc now states the scoring contract (k1, b, idf, avgdl, tokenization). Closes Phase 01's last exit item."
 
 [[recent]]
 date = "2026-09-25"

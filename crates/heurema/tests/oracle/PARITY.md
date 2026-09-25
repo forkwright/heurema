@@ -14,10 +14,12 @@ the engines, as the green definition below requires.
 `cargo test -p heurema --test oracle` is the parity check.
 
 HNSW graph-internal invariants are unit-tested beside the engine in
-`src/hnsw/engine.rs` (clause 4 below). BM25 formula internals are checked here
-only through trait-observable properties. Phase 01's exit also requires an
-independently written BM25 formula reference checked against `Bm25Index`;
-that reference is not in this directory yet, so Phase 01 is not closed.
+`src/hnsw/engine.rs` (clause 4 below). BM25's formula is pinned by
+`bm25_formula`, which checks `Bm25Index` against an independently written `f64`
+BM25 reference that recomputes every score from the raw live corpus over
+seeded insert, replace, and remove workloads: IDs must match in order, scores
+must agree within a derived `f32` bound, and every perturbed reference must
+be caught. With it, Phase 01's exit is met.
 
 ## Green definition (Phase 01 exit)
 
@@ -58,7 +60,8 @@ commit:
 
 ## Fixture governance
 
-The seeds in `support.rs` are part of the parity contract: changing one
+The seeds in `support.rs`, and the inline workload seeds in `hnsw.rs` and
+`bm25_formula.rs`, are part of the parity contract: changing one
 re-baselines every fixture that draws from it, so a seed change is called out
 in its commit message and re-validated against the recall floor. Fixture
 sizes stay small enough for the suite to run in milliseconds — the recall

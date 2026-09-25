@@ -47,10 +47,10 @@ index and the records it was built from, become visible together.
 
 ## Status
 
-Phase 01 landed both fresh engines; its one open exit item is an independently written BM25 formula
-reference checked against `Bm25Index`. Phase 02, the durable retrieval lifecycle (named indexes, staged
-writes, one atomic publish point, recovery, and deletion rules), follows; the Datalog engine
-`akolouthia` comes after it. CLAUDE.md's Roadmap carries the phase list.
+Phase 01 (fresh HNSW and BM25 engines, each checked against an independent oracle) is complete.
+Phase 02, the durable retrieval lifecycle (named indexes, staged writes, one atomic publish point,
+recovery, and deletion rules), is next; the Datalog engine `akolouthia` follows it. CLAUDE.md's Roadmap
+carries the phase list.
 
 ## API surface
 
