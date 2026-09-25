@@ -22,9 +22,41 @@ struct DocumentTerms {
 
 /// An in-memory BM25 index for the configured `Simple` tokenizer pipeline.
 ///
-/// `Simple` splits on non-alphanumeric Unicode characters, lowercases each
-/// token with Rust Unicode lowercase mapping, and applies no accent folding
-/// or stop-word filtering. Queries use the same pipeline.
+/// `Simple` splits on every character for which [`char::is_alphanumeric`] is
+/// false and discards the empty pieces; only then does it lowercase each
+/// remaining token, as a whole, with [`str::to_lowercase`]. Context-dependent
+/// mappings such as the Greek final sigma therefore resolve within the token,
+/// and a lowercase mapping that yields a non-alphanumeric character (`İ`
+/// becomes `i` plus U+0307) keeps it inside the token. The pipeline applies no
+/// accent folding or stop-word filtering. Queries use the same pipeline.
+///
+/// # Scoring
+///
+/// A query scores each live document `d` against the distinct terms `t` of
+/// the query that occur in `d`:
+///
+/// ```text
+/// score(d) = sum over t of idf(t) * tf(t, d) * (k1 + 1)
+///                          / (tf(t, d) + k1 * (1 - b + b * |d| / avgdl))
+///
+/// idf(t)   = ln(1 + (N - n(t) + 0.5) / (n(t) + 0.5))
+/// ```
+///
+/// - `k1 = 1.2` and `b = 0.75`.
+/// - `N` is the number of live documents and `n(t)` the number of live
+///   documents containing `t` at least once. The idf is the non-negative
+///   variant of the Robertson/Spärck Jones weight: it is positive for every
+///   `n(t)` in `1..=N`, including terms present in more than half the corpus.
+/// - `tf(t, d)` counts the occurrences of token `t` in `d`. `|d|` is the
+///   number of tokens `d` yields, repeats included, and `avgdl` is the sum of
+///   `|d|` over the live documents divided by `N`. A document that yields no
+///   tokens still counts toward `N` and toward `avgdl`'s denominator.
+/// - A term repeated in the query contributes once: query-term frequency
+///   carries no weight.
+/// - The results are exactly the live documents containing at least one
+///   query term, so a query that yields no tokens returns nothing. Their
+///   order and truncation to `k` follow [`FtsIndex::query`]. Scores are
+///   computed in `f32`.
 ///
 /// Documents retain their token counts while postings retain per-term document
 /// frequencies. Replacing or removing an ID first removes its old contribution,

@@ -5,5 +5,6 @@
 //! the green contract and what "reaches parity" means operationally.
 
 mod bm25;
+mod bm25_formula;
 mod hnsw;
 mod support;
