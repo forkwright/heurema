@@ -820,15 +820,23 @@ mod tests {
     use heurema::{IndexName, OwnerNamespace};
 
     #[test]
-    fn poisoned_writer_lock_refuses_lifecycle_writes_but_not_reads() {
+    fn poisoned_commit_lock_refuses_every_lifecycle_write_but_not_reads() {
         let dir = tempfile::tempdir().expect("tempdir");
         let backend = ThesaurosBackend::open(dir.path()).expect("open");
         let index = IndexIdentity::new(
             OwnerNamespace::try_from("example").expect("namespace"),
             IndexName::try_from("notes").expect("name"),
         );
-
         let key = OperationKey::try_from("op-1").expect("key");
+        let v1 = IndexVersion::FIRST;
+        // NOTE: with version 1 staged, the publish and the quarantine below
+        // would succeed without the lock, and the stage and the destroy would
+        // meet another refusal; only the lock makes each one `poisoned`.
+        backend
+            .stage(StageWrite::new(
+                &index, v1, &key, None, b"marker", b"payload",
+            ))
+            .expect("stage before the panic");
 
         let writer = std::thread::scope(|scope| {
             scope
@@ -840,26 +848,55 @@ mod tests {
         });
         assert!(writer.is_err(), "the writer thread panicked");
 
-        let error = backend
-            .stage(StageWrite::new(
-                &index,
-                IndexVersion::FIRST,
-                &key,
-                None,
-                b"marker",
-                b"payload",
-            ))
-            .expect_err("a poisoned writer lock refuses writes");
-        assert!(
-            matches!(error, HeuremaError::Persistence { .. }),
-            "{error:?}"
-        );
-        assert!(error.to_string().contains("poisoned"), "{error}");
+        let writes = [
+            (
+                "stage",
+                backend.stage(StageWrite::new(
+                    &index, v1, &key, None, b"marker", b"payload",
+                )),
+            ),
+            (
+                "publish",
+                backend.publish(PublishWrite::new(
+                    &index,
+                    v1,
+                    &key,
+                    None,
+                    b"marker",
+                    b"head",
+                    b"operation",
+                )),
+            ),
+            (
+                "destroy",
+                backend.destroy(DestroyWrite::new(
+                    &index,
+                    &key,
+                    b"head",
+                    b"destroyed",
+                    b"destroy",
+                    &[v1],
+                )),
+            ),
+            (
+                "quarantine",
+                backend.quarantine(QuarantineWrite::new(&index, v1, b"marker")),
+            ),
+        ];
+        for (write, result) in writes {
+            let error = result.expect_err("a poisoned commit lock refuses every write");
+            assert!(
+                matches!(error, HeuremaError::Persistence { .. }),
+                "{write}: {error:?}"
+            );
+            assert!(error.to_string().contains("poisoned"), "{write}: {error}");
+        }
         assert_eq!(
             backend.read_staging(&index).expect("reads take no lock"),
-            None,
-            "the refused stage wrote nothing"
+            Some((v1, b"marker".to_vec())),
+            "the refused writes changed nothing"
         );
+        assert_eq!(backend.read_head(&index).expect("reads take no lock"), None);
     }
 
     #[test]

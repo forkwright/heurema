@@ -85,12 +85,13 @@
 //! outcome and every member it changed ([`MemberChange`]).
 //!
 //! `atmis` and `thesauros` implement it. `atmis` applies each write under
-//! one mutex over all five maps. `thesauros` commits each write as one fjall
-//! write batch with `PersistMode::SyncAll`, which fjall journals as one
-//! checksummed unit, fsyncs, and replays only whole on reopen, so a crash
-//! leaves all of a write or none of it. That journal property is relied on,
-//! not simulated: the tests stop an operation between writes, never inside
-//! one.
+//! one mutex over all five maps; its quarantine is a `Vec` in sequence
+//! order, and the other four are keyed by `storage_key`. `thesauros`
+//! commits each write as one fjall write batch with `PersistMode::SyncAll`,
+//! which fjall journals as one checksummed unit, fsyncs, and replays only
+//! whole on reopen, so a crash leaves all of a write or none of it. That
+//! journal property is relied on, not simulated: the tests stop an
+//! operation between writes, never inside one.
 //!
 //! `PersistenceBackend` and its whole-index snapshots are unchanged and
 //! separate: a snapshot is a single save, not a lifecycle version, and the
@@ -99,10 +100,19 @@
 //! # Publishing and reading
 //!
 //! [`IndexLifecycle`] runs every operation in one order: stateless checks,
-//! replay lookup by key and digest, head read and permission, staged-state
-//! check, an in-memory build of the successor version, stage, publish. The
-//! checks write nothing, so a refused operation leaves storage as it was,
-//! and a stateless refusal makes no backend call at all.
+//! the backend's writer, head read, replay lookup by key and digest, the
+//! active version's payload, permission, staged-state check, an in-memory
+//! build of the successor version, stage, publish. The checks write
+//! nothing, so a refused operation leaves storage as it was, and a
+//! stateless refusal makes no backend call at all.
+//!
+//! Every lifecycle over one backend shares the backend's [`WriterLock`]
+//! ([`LifecycleBackend::writer`]), held from before the head read until the
+//! operation publishes or is dropped. Another thread's operation waits for
+//! it; a thread that already holds it is refused with
+//! [`HeuremaError::WriterHeld`](crate::HeuremaError::WriterHeld) instead of
+//! waiting for itself. A staged version that any operation meets is
+//! therefore interrupted state, never another operation's live stage.
 //!
 //! The publish point is one atomic backend write. Before it, readers see
 //! the old version; after it, they see the new head, the operation record,
@@ -117,8 +127,11 @@
 //! The same key with the same digest replays the recorded outcome and writes
 //! nothing; the same key with another digest is refused with
 //! [`HeuremaError::OperationConflict`](crate::HeuremaError::OperationConflict).
-//! Only published operations are recorded, so an interrupted or refused one
-//! can be retried under its key.
+//! Only published operations are recorded, so the key of a refused or
+//! interrupted operation stays free. One refused before it staged anything
+//! can be retried at once. One interrupted after its stage can be retried
+//! once recovery, which a later Phase 02 change adds, has moved its staged
+//! state to quarantine.
 //!
 //! A version staged but never published is orphan staged state. It refuses
 //! every mutation of its index, Create and Destroy included, with

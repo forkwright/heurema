@@ -4,8 +4,10 @@
 //! reopen the fjall database.
 //!
 //! WHY one suite for both: the lifecycle driver must behave the same on
-//! either adapter, so each refusal and each listing order is pinned once and
-//! checked against both. Values here are opaque byte strings on purpose: the
+//! either adapter, so each refusal, each write's all-or-nothing visibility
+//! to a concurrent reader, each write's exclusion of a racing writer, and
+//! each listing order are pinned once and checked against both. Values here
+//! are opaque byte strings on purpose: the
 //! adapter contract is independent of heurēma's record encodings
 //! (`crates/heurema/src/lifecycle/encoding.rs`), which
 //! `lifecycle_conformance.rs` exercises through the driver, and the backend
@@ -22,7 +24,9 @@
 use std::cell::Cell;
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use atmis::AtmisBackend;
 use heurema::lifecycle::storage_key;
@@ -69,12 +73,14 @@ conformance!(
     operation_records_are_never_overwritten,
     destroy_with_a_staging_marker_present_is_refused,
     destroy_with_a_stale_expected_head_is_refused,
-    destroy_removes_listed_versions_atomically,
+    destroy_removes_every_listed_version_and_keeps_the_audit_chain,
     quarantine_moves_staged_state_and_never_deletes_it,
     quarantine_refuses_a_changed_or_missing_marker,
     list_staged_enumerates_exactly_the_markers,
     indexes_whose_keys_share_a_prefix_stay_separate,
     listings_come_back_in_storage_key_order,
+    a_concurrent_reader_never_sees_part_of_a_write,
+    racing_writers_on_one_index_admit_exactly_one,
 );
 
 // WHY: tempdir creation fails with `io::Error`, distinct from every backend
@@ -614,7 +620,9 @@ fn destroy_with_a_stale_expected_head_is_refused(backend: &dyn LifecycleBackend)
     Ok(())
 }
 
-fn destroy_removes_listed_versions_atomically(backend: &dyn LifecycleBackend) -> TestResult {
+fn destroy_removes_every_listed_version_and_keeps_the_audit_chain(
+    backend: &dyn LifecycleBackend,
+) -> TestResult {
     let notes = notes()?;
     let other = index("example", "other")?;
     let head_1 = publish_version(backend, &notes, 1, None)?;
@@ -853,6 +861,326 @@ fn listings_come_back_in_storage_key_order(backend: &dyn LifecycleBackend) -> Te
         .map(|(key, _)| key.as_str().to_owned())
         .collect();
     assert_eq!(keys, ["A1", "a", "b", "op-1"]);
+    Ok(())
+}
+
+/// Rounds of [`a_concurrent_reader_never_sees_part_of_a_write`].
+///
+/// WHY this few: on `thesauros` each round is nine `SyncAll` writes, each an
+/// fsync, and the reader polls thousands of times inside each one.
+const READER_ROUNDS: usize = 25;
+
+/// Versions each reader round stages and publishes before it destroys.
+const READER_VERSIONS: u64 = 4;
+
+/// The index of reader round `round`.
+fn race_index(round: usize) -> Result<IndexIdentity, HeuremaError> {
+    index("example", &format!("race-{round}"))
+}
+
+/// The version `head` names, when it is one [`bytes`] wrote for `index`.
+fn active_version(index: &IndexIdentity, head: Option<&[u8]>) -> Option<u64> {
+    let head = head?;
+    (1..=READER_VERSIONS).find(|&value| head == bytes("head", index, value).as_slice())
+}
+
+const DESTROYED: &[u8] = b"destroyed";
+
+/// One reader poll of `round`'s index: the invariants every atomic write
+/// keeps, each read in an order where the fact that implies the other is
+/// read first, so a correct adapter never fails one (a read sees every
+/// write that returned before it began).
+fn poll(backend: &dyn LifecycleBackend, round: usize) -> Result<Vec<String>, HeuremaError> {
+    let index = race_index(round)?;
+    let mut violations = Vec::new();
+
+    let head = backend.read_head(&index)?;
+    let active = active_version(&index, head.as_deref());
+    if let Some(value) = active {
+        // I1: publish writes the head and its operation record together.
+        if backend
+            .read_operation(&index, &version_key(value)?)?
+            .is_none()
+        {
+            violations.push(format!(
+                "{index}: head v{value} without its operation record"
+            ));
+        }
+        // I2: publish removes the marker of the version it publishes.
+        if let Some((staged, _)) = backend.read_staging(&index)?
+            && staged.get() <= value
+        {
+            violations.push(format!(
+                "{index}: head v{value} beside a marker for v{staged}"
+            ));
+        }
+    }
+    if head.as_deref() == Some(DESTROYED) {
+        // I3: destroy writes the head and its record and removes every
+        // listed payload together.
+        if backend.read_operation(&index, &key("destroy")?)?.is_none() {
+            violations.push(format!(
+                "{index}: destroyed head without its operation record"
+            ));
+        }
+        for value in 1..=READER_VERSIONS {
+            if backend.read_version(&index, version(value)?)?.is_some() {
+                violations.push(format!(
+                    "{index}: destroyed head beside the payload of v{value}"
+                ));
+            }
+        }
+    }
+    // I4: stage writes a marker and its payload together, and only destroy
+    // removes the payload.
+    if let Some((staged, marker)) = backend.read_staging(&index)? {
+        if marker != bytes("marker", &index, staged.get()) {
+            violations.push(format!("{index}: marker of v{staged} holds other bytes"));
+        }
+        if backend.read_version(&index, staged)?.is_none()
+            && backend.read_head(&index)?.as_deref() != Some(DESTROYED)
+        {
+            violations.push(format!("{index}: marker of v{staged} without its payload"));
+        }
+    }
+    // I5: a payload past the head is staged (its marker is there) or was
+    // published or destroyed since the head was read.
+    if head.as_deref() != Some(DESTROYED) {
+        let next = active.unwrap_or(0) + 1;
+        if next <= READER_VERSIONS && backend.read_version(&index, version(next)?)?.is_some() {
+            let marked = backend
+                .read_staging(&index)?
+                .is_some_and(|(staged, _)| staged.get() == next);
+            let fresh = backend.read_head(&index)?;
+            let moved = fresh.as_deref() == Some(DESTROYED)
+                || active_version(&index, fresh.as_deref()).is_some_and(|value| value >= next);
+            if !marked && !moved {
+                violations.push(format!(
+                    "{index}: payload of v{next} that no marker or head names"
+                ));
+            }
+        }
+    }
+    Ok(violations)
+}
+
+/// Stages and publishes [`READER_VERSIONS`] versions of `round`'s index,
+/// then destroys it.
+fn write_round(backend: &dyn LifecycleBackend, round: usize) -> TestResult {
+    let index = race_index(round)?;
+    let mut head: Option<Vec<u8>> = None;
+    for value in 1..=READER_VERSIONS {
+        head = Some(publish_version(backend, &index, value, head.as_deref())?);
+    }
+    let versions = (1..=READER_VERSIONS)
+        .map(version)
+        .collect::<Result<Vec<_>, _>>()?;
+    backend.destroy(DestroyWrite::new(
+        &index,
+        &key("destroy")?,
+        head.as_deref().unwrap_or_default(),
+        DESTROYED,
+        b"destroy",
+        &versions,
+    ))
+}
+
+/// Writes every reader round, publishing `current` before each, and waits
+/// after each until the reader has polled since the round began.
+fn write_rounds(
+    backend: &dyn LifecycleBackend,
+    current: &AtomicUsize,
+    polls: &AtomicUsize,
+    reader_exited: &AtomicBool,
+) -> TestResult {
+    for round in 0..READER_ROUNDS {
+        let polled = polls.load(Ordering::SeqCst);
+        current.store(round, Ordering::SeqCst);
+        write_round(backend, round)?;
+        // WHY: every round is polled at least once, without a sleep.
+        while polls.load(Ordering::SeqCst) == polled && !reader_exited.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+    }
+    Ok(())
+}
+
+fn a_concurrent_reader_never_sees_part_of_a_write<B: LifecycleBackend + Sync>(
+    backend: &B,
+) -> TestResult {
+    let current = AtomicUsize::new(0);
+    let polls = AtomicUsize::new(0);
+    let done = AtomicBool::new(false);
+    let reader_exited = AtomicBool::new(false);
+
+    let (written, violations) = thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            // WHY no panic here: a violation or a backend error is collected,
+            // so the writer is never left waiting for a dead reader.
+            let mut violations = Vec::new();
+            let mut seen = 0_usize;
+            while !done.load(Ordering::SeqCst) {
+                match poll(backend, current.load(Ordering::SeqCst)) {
+                    Ok(found) => {
+                        seen += found.len();
+                        violations.extend(found.into_iter().take(10 - violations.len().min(10)));
+                    }
+                    Err(error) => {
+                        seen += 1;
+                        if violations.len() < 10 {
+                            violations.push(format!("backend error: {error}"));
+                        }
+                    }
+                }
+                polls.fetch_add(1, Ordering::SeqCst);
+            }
+            reader_exited.store(true, Ordering::SeqCst);
+            (seen, violations)
+        });
+        let written = write_rounds(backend, &current, &polls, &reader_exited);
+        done.store(true, Ordering::SeqCst);
+        let violations = match reader.join() {
+            Ok(violations) => violations,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        (written, violations)
+    });
+    written?;
+    let (seen, first) = violations;
+    assert_eq!(
+        seen,
+        0,
+        "{seen} violations over {} polls; first: {first:#?}",
+        polls.load(Ordering::SeqCst)
+    );
+    Ok(())
+}
+
+/// Rounds of [`racing_writers_on_one_index_admit_exactly_one`], and the
+/// threads that race each write.
+const CONTENTION_ROUNDS: usize = 20;
+const CONTENTION_THREADS: usize = 4;
+
+/// Runs `write` on [`CONTENTION_THREADS`] threads released together, and
+/// returns each thread's result in thread order.
+fn race<F>(write: F) -> Vec<TestResult>
+where
+    F: Fn(usize) -> TestResult + Sync,
+{
+    let barrier = Barrier::new(CONTENTION_THREADS);
+    thread::scope(|scope| {
+        let racers: Vec<_> = (0..CONTENTION_THREADS)
+            .map(|thread| {
+                let (barrier, write) = (&barrier, &write);
+                scope.spawn(move || {
+                    barrier.wait();
+                    write(thread)
+                })
+            })
+            .collect();
+        racers
+            .into_iter()
+            .map(|racer| match racer.join() {
+                Ok(result) => result,
+                Err(panic) => std::panic::resume_unwind(panic),
+            })
+            .collect()
+    })
+}
+
+/// The one thread whose write succeeded, requiring every other to have
+/// been refused as `lost` expects.
+#[track_caller]
+fn sole_winner(results: Vec<TestResult>, lost: fn(&HeuremaError) -> bool, what: &str) -> usize {
+    let mut winners = Vec::new();
+    for (thread, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(()) => winners.push(thread),
+            Err(error) => assert!(lost(&error), "{what}: thread {thread}: {error:?}"),
+        }
+    }
+    match winners.as_slice() {
+        [winner] => *winner,
+        _ => panic!("{what}: exactly one write must succeed, not threads {winners:?}"),
+    }
+}
+
+fn racing_writers_on_one_index_admit_exactly_one<B: LifecycleBackend + Sync>(
+    backend: &B,
+) -> TestResult {
+    let v1 = version(1)?;
+    for round in 0..CONTENTION_ROUNDS {
+        let index = race_index(round)?;
+        let own = |kind: &str, thread: usize| bytes(&format!("{kind}-{thread}"), &index, 1);
+
+        let staged = race(|thread| {
+            backend.stage(StageWrite::new(
+                &index,
+                v1,
+                &key(&format!("op-{thread}"))?,
+                None,
+                &own("marker", thread),
+                &own("payload", thread),
+            ))
+        });
+        let stager = sole_winner(
+            staged,
+            |error| matches!(error, HeuremaError::StagedStateExists { version, .. } if version.get() == 1),
+            &format!("round {round} stage"),
+        );
+        assert_eq!(
+            backend.read_staging(&index)?,
+            Some((v1, own("marker", stager)))
+        );
+        assert_eq!(
+            backend.read_version(&index, v1)?,
+            Some(own("payload", stager))
+        );
+
+        let marker = own("marker", stager);
+        let published = race(|thread| {
+            backend.publish(PublishWrite::new(
+                &index,
+                v1,
+                &key(&format!("k-{thread}"))?,
+                None,
+                &marker,
+                &own("head", thread),
+                &own("operation", thread),
+            ))
+        });
+        let publisher = sole_winner(
+            published,
+            |error| matches!(error, HeuremaError::HeadChanged { .. }),
+            &format!("round {round} publish"),
+        );
+        let head = own("head", publisher);
+        assert_eq!(backend.read_head(&index)?, Some(head.clone()));
+        assert_eq!(
+            backend.list_operations(&index)?,
+            [(key(&format!("k-{publisher}"))?, own("operation", publisher))]
+        );
+
+        let destroyed = race(|thread| {
+            backend.destroy(DestroyWrite::new(
+                &index,
+                &key(&format!("d-{thread}"))?,
+                &head,
+                &own("destroyed", thread),
+                &own("destroy", thread),
+                &[v1],
+            ))
+        });
+        let destroyer = sole_winner(
+            destroyed,
+            |error| matches!(error, HeuremaError::HeadChanged { .. }),
+            &format!("round {round} destroy"),
+        );
+        assert_eq!(
+            backend.read_head(&index)?,
+            Some(own("destroyed", destroyer))
+        );
+    }
     Ok(())
 }
 

@@ -118,6 +118,9 @@ conformance!(
     a_same_key_publish_between_the_head_read_and_the_replay_lookup_replays,
     a_same_key_publish_after_the_replay_lookup_is_refused_with_nothing_written,
     lifecycles_that_bypass_the_shared_writer_still_never_both_publish,
+    a_head_naming_a_missing_payload_is_corrupt_not_absent,
+    a_destroy_between_the_head_read_and_the_payload_read_is_head_changed_or_not_found,
+    a_head_contradicting_its_payload_config_is_corrupt_before_any_refusal,
     lifecycle_and_snapshot_keyspaces_are_independent,
 );
 
@@ -425,17 +428,23 @@ enum Hook {
     AfterReadHead,
     /// Once `read_operation` has read the record, before it returns.
     AfterReadOperation,
+    /// When `read_version` is called, before it reads.
+    BeforeReadVersion,
 }
 
 /// Forwards every call to `inner` except [`LifecycleBackend::writer`], which
 /// returns this wrapper's own [`WriterLock`]: it models code that bypasses
 /// heurēma's shared writer, so a lifecycle over `inner` can write in the
 /// middle of an operation run through this one. An armed hook runs once, at
-/// its [`Hook`] point, after the inner read's result is computed.
+/// its [`Hook`] point; an "after" hook runs once the inner read's result is
+/// computed. `hide_versions` makes every payload read as absent, and
+/// `rewrite_head` edits every head read, the way damage would.
 struct Bypassing<'h, B> {
     inner: B,
     writer: WriterLock,
     hook: RefCell<Option<Armed<'h>>>,
+    hide_versions: bool,
+    rewrite_head: Option<fn(Vec<u8>) -> Vec<u8>>,
 }
 
 /// A hook and the point it runs at.
@@ -447,6 +456,8 @@ impl<'h, B> Bypassing<'h, B> {
             inner,
             writer: WriterLock::new(),
             hook: RefCell::new(None),
+            hide_versions: false,
+            rewrite_head: None,
         }
     }
 
@@ -471,7 +482,10 @@ impl<B: LifecycleBackend> LifecycleBackend for Bypassing<'_, B> {
     fn read_head(&self, index: &IndexIdentity) -> Result<Option<Vec<u8>>, HeuremaError> {
         let head = self.inner.read_head(index);
         self.fire(Hook::AfterReadHead);
-        head
+        match self.rewrite_head {
+            Some(rewrite) => head.map(|head| head.map(rewrite)),
+            None => head,
+        }
     }
 
     fn read_version(
@@ -479,7 +493,9 @@ impl<B: LifecycleBackend> LifecycleBackend for Bypassing<'_, B> {
         index: &IndexIdentity,
         version: IndexVersion,
     ) -> Result<Option<Vec<u8>>, HeuremaError> {
-        self.inner.read_version(index, version)
+        self.fire(Hook::BeforeReadVersion);
+        let payload = self.inner.read_version(index, version)?;
+        Ok(payload.filter(|_| !self.hide_versions))
     }
 
     fn read_operation(
@@ -2209,6 +2225,109 @@ fn lifecycles_that_bypass_the_shared_writer_still_never_both_publish<S: Store>(
     // NOTE: a refused operation was never recorded, so its key can be
     // retried.
     assert_receipt(&second.apply(insert(&notes, "b", member(4))?)?, 6, false);
+    Ok(())
+}
+
+/// Requires `result` to be refused as corrupt stored state.
+#[track_caller]
+fn assert_corrupt<T: fmt::Debug>(result: Result<T, HeuremaError>) {
+    let error = refused(result);
+    assert!(
+        matches!(error, HeuremaError::CorruptSnapshot { .. }),
+        "unexpected {error:?}"
+    );
+    assert_eq!(error.category(), ErrorCategory::Corrupt, "{error}");
+}
+
+fn a_head_naming_a_missing_payload_is_corrupt_not_absent<S: Store>(store: &S) -> TestResult {
+    let backend = store.open()?;
+    let notes = index("notes")?;
+    seeded(&Lifecycle::open(&backend)?, &notes)?;
+    let damaged = Lifecycle::open(Bypassing {
+        hide_versions: true,
+        ..Bypassing::new(&backend)
+    })?;
+
+    assert_corrupt(damaged.index(&notes));
+    assert_corrupt(damaged.apply(insert(&notes, "k", vec![vector(3, 30, &[1.0, 1.0])])?));
+    Ok(())
+}
+
+fn a_destroy_between_the_head_read_and_the_payload_read_is_head_changed_or_not_found<S: Store>(
+    store: &S,
+) -> TestResult {
+    let backend = store.open()?;
+    let other = Lifecycle::open(&backend)?;
+    let racer = Lifecycle::open(Bypassing::new(&backend))?;
+
+    // NOTE: a read that finds the index destroyed after its head read reports
+    // it absent, as a read after the destroy would.
+    let notes = index("notes")?;
+    seeded(&other, &notes)?;
+    let destroying = destroy(&notes, "destroy", 1)?;
+    racer.backend().arm(Hook::BeforeReadVersion, || {
+        if let Err(error) = other.apply(destroying) {
+            panic!("the other lifecycle's destroy: {error:?}");
+        }
+    });
+    match refused(racer.index(&notes)) {
+        HeuremaError::IndexNotFound { .. } => {}
+        other => panic!("unexpected {other:?}"),
+    }
+
+    // NOTE: an operation computed from the head the destroy replaced is
+    // refused as a conflict, having written nothing.
+    let fresh = index("fresh")?;
+    seeded(&other, &fresh)?;
+    let destroying = destroy(&fresh, "destroy", 1)?;
+    racer.backend().arm(Hook::BeforeReadVersion, || {
+        if let Err(error) = other.apply(destroying) {
+            panic!("the other lifecycle's destroy: {error:?}");
+        }
+    });
+    match refused(racer.prepare(insert(&fresh, "k", vec![vector(3, 30, &[1.0, 1.0])])?)) {
+        HeuremaError::HeadChanged { .. } => {}
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(staged_version(&other, &fresh)?, None);
+    assert_eq!(
+        head_state(&other, &fresh)?,
+        Some((IndexStateKind::Destroyed, 2))
+    );
+    Ok(())
+}
+
+/// A head record rewritten to name three dimensions where it named two.
+fn widened(head: Vec<u8>) -> Vec<u8> {
+    match String::from_utf8(head) {
+        Ok(text) => text
+            .replacen("\"dimensions\":2", "\"dimensions\":3", 1)
+            .into_bytes(),
+        Err(error) => error.into_bytes(),
+    }
+}
+
+fn a_head_contradicting_its_payload_config_is_corrupt_before_any_refusal<S: Store>(
+    store: &S,
+) -> TestResult {
+    let backend = store.open()?;
+    let notes = index("notes")?;
+    seeded(&Lifecycle::open(&backend)?, &notes)?;
+    let damaged = Lifecycle::open(Bypassing {
+        rewrite_head: Some(widened),
+        ..Bypassing::new(&backend)
+    })?;
+    assert_eq!(
+        damaged.record(&notes)?.map(|record| record.config),
+        Some(IndexConfig::Vector(HnswConfig::new(3))),
+        "the rewrite reaches the head"
+    );
+
+    assert_corrupt(damaged.index(&notes));
+    // WHY a two-dimensional member: against the damaged head's three
+    // dimensions it would be a `DimensionMismatch`, a refusal of the caller's
+    // input; the damage is reported first.
+    assert_corrupt(damaged.prepare(insert(&notes, "k", vec![vector(3, 30, &[1.0, 1.0])])?));
     Ok(())
 }
 

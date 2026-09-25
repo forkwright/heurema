@@ -105,3 +105,11 @@ status = "accepted"
 context = "The repository's own docs numbered phases 1-3 while the planning roadmap numbered them 00-04, so the same label named different work (repo Phase 3 was the persistence adapters; planning Phase 03 is akolouthia)."
 decision = "Public docs, crate metadata, and PR titles use the planning numbering: 00 producer contract, 01 fresh retrieval engines, 02 durable retrieval lifecycle, 03 akolouthia, 04 consumer adapters and retirement. CLAUDE.md's Roadmap maps the old labels once."
 consequences = "Older decisions in this file keep the labels they were written with; CLAUDE.md's Roadmap is where old Phase 1, 2, and 3 translate to the current numbering."
+
+[[decision]]
+id = "heurema-lifecycle-shared-writer"
+title = "One lifecycle writer per backend, shared by every lifecycle over it"
+status = "accepted"
+context = "The writer lock that serialized a lifecycle's prepare-to-publish window belonged to each IndexLifecycle, while the &B, Box<B>, and Arc<B> forwarding impls invite several lifecycles over one backend. That left a same-key race (a key published by another lifecycle between the replay lookup and the head read left orphan staged state behind a refusal that said nothing was written) and reported another lifecycle's live stage as StagedStateExists, category RecoveryRequired, which recovery could not tell from an orphan."
+decision = "A backend-owned WriterLock, reached through the required LifecycleBackend::writer, which every adapter owns once and every wrapper forwards. IndexLifecycle takes it after the stateless checks and holds it through publish or drop; another thread waits, and a thread that already holds it is refused with WriterHeld. The head is read before the replay lookup, and stage refuses an operation key that is already recorded."
+consequences = "StagedStateExists and RecoveryRequired are sound for lifecycle callers: a staged version met under the writer is interrupted state. Recovery must take the writer for its whole pass, which settles live versus orphan without a registry. Mutations on one backend are serialized through the build, the encode, and both durable writes; narrowing that needs recovery to tell a live stage from an orphan."

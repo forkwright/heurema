@@ -114,7 +114,7 @@ purpose = "Class of a HeuremaError (Refused, NotFound, Unsupported, Corrupt, Sto
 crate = "heurema"
 kind = "trait"
 name = "LifecycleBackend"
-purpose = "Object-safe storage contract of the durable lifecycle, beside the unchanged PersistenceBackend (which has no delete, exists, batch, or compare-and-set and is not dyn-compatible). Adapters store opaque heurema-encoded bytes under the storage_key grammar and own no encoding or rule. stage, publish, destroy, and quarantine are each atomic and durable before Ok; each compares the head (or staged marker) it expects under a backend-owned lock, never overwrites a payload or operation record, and refuses while the index holds staged state. read_* and list_* serve the driver and recovery. Implemented by AtmisBackend and ThesaurosBackend, and forwarded through &B, Box<B>, and Arc<B>."
+purpose = "Object-safe storage contract of the durable lifecycle, beside the unchanged PersistenceBackend (which has no delete, exists, batch, or compare-and-set and is not dyn-compatible). writer() returns the one WriterLock every lifecycle over the backend shares. Adapters store opaque heurema-encoded bytes under the storage_key grammar and own no encoding or rule. stage, publish, destroy, and quarantine are each atomic and durable before Ok; each compares the head (or staged marker) it expects under a backend-owned lock, never overwrites a payload or operation record, and refuses while the index holds staged state; stage also refuses a payload already under its version (VersionStored) and a recorded operation key. read_* and list_* serve the driver and recovery. Implemented by AtmisBackend and ThesaurosBackend, and forwarded, writer included, through &B, Box<B>, and Arc<B>."
 
 [[interfaces]]
 crate = "heurema"
@@ -198,7 +198,13 @@ purpose = "SHA-256 over the domain prefix heurema.lifecycle.operation.v1 and the
 crate = "heurema"
 kind = "type"
 name = "IndexLifecycle"
-purpose = "The lifecycle driver over any LifecycleBackend. apply(operation) runs, in order: CheckedOperation::check (no backend call), replay lookup by (index, key) (same digest returns the recorded PublishReceipt with replayed set and writes nothing; another digest is OperationConflict), head read and permit, the staged-state check (any staging marker refuses every mutation of the index with StagedStateExists, Create and Destroy included), an in-memory build of the successor version (members in ascending identity order; Rebuild from an empty engine), stage (payload plus marker, head compare-and-set), and publish (one atomic write of head, operation record, and marker removal; Destroy writes its destroyed head and removes every payload instead). prepare / Prepared::stage / Staged::publish expose the steps. record() reads the head; index() reads the head then only the payload it names, so a staged version is never readable. open() does not recover yet: orphan staged state blocks its index until a later Phase 02 change adds recovery."
+purpose = "The lifecycle driver over any LifecycleBackend. apply(operation) runs, in order: CheckedOperation::check (no backend call), the backend's shared WriterLock (WriterHeld if this thread already holds it; another thread waits), head read, replay lookup by (index, key) (same digest returns the recorded PublishReceipt with replayed set and writes nothing; another digest is OperationConflict), the active payload cross-checked against the head (CorruptSnapshot when missing or of another configuration), permit, the staged-state check (any staging marker refuses every mutation of the index with StagedStateExists, Create and Destroy included), an in-memory build of the successor version (members in ascending identity order; Rebuild from an empty engine), stage (payload plus marker, head compare-and-set), and publish (one atomic write of head, operation record, and marker removal; Destroy writes its destroyed head and removes every payload instead). prepare / Prepared::stage / Staged::publish expose the steps. record() reads the head; index() reads the head then only the payload it names, so a staged version is never readable. open() does not recover yet: orphan staged state blocks its index until a later Phase 02 change adds recovery."
+
+[[interfaces]]
+crate = "heurema"
+kind = "struct"
+name = "WriterLock"
+purpose = "The lifecycle writer every lifecycle over one backend shares, returned by LifecycleBackend::writer. acquire() waits while another thread holds it and refuses a thread that already holds it with WriterHeld; the !Send WriterGuard releases it on drop, unwinding included. Guards no data; not FIFO; a leaked guard keeps it held."
 
 [[interfaces]]
 crate = "heurema"
