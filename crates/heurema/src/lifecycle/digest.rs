@@ -12,7 +12,18 @@
 //! formatter can change within serde_json 1.x; and `to_value` maps NaN and
 //! both infinities to `null`, so two different provenance values could share
 //! one digest. This encoder sorts map entries itself, refuses floats, and
-//! depends on nothing but serde's data model.
+//! depends on nothing but serde's data model. serde_json's own types are
+//! held to the same rule: with `arbitrary_precision` unified on, a
+//! `serde_json::Number` serializes as a private struct holding its decimal
+//! text, and the encoder writes an integer there as the same item the default
+//! build writes, so that feature cannot change a digest either.
+//!
+//! What the encoder cannot make canonical is a consumer type whose own
+//! `Serialize` output differs between equal values. A sequence is hashed in
+//! the order it is emitted, because sorting it would merge two operations
+//! that differ only in order, so a `HashSet` inside provenance or retention
+//! would give one value a different digest from one process to the next. The
+//! marker traits' contracts rule such types out.
 
 use std::fmt;
 
@@ -272,19 +283,70 @@ struct Encoder<'a> {
     out: &'a mut Vec<u8>,
 }
 
-/// A length or count as the grammar writes it.
-fn count(len: usize) -> [u8; 8] {
-    // INVARIANT: `usize` is at most 64 bits on every target Rust supports, so
-    // the conversion is lossless.
-    (len as u64).to_be_bytes()
+/// A length or count as the grammar writes it: a `u64`, big-endian.
+fn count(len: usize) -> Result<[u8; 8], EncodeError> {
+    u64::try_from(len)
+        .map(u64::to_be_bytes)
+        .map_err(|_| EncodeError(format!("a length of {len} does not fit the grammar's u64")))
 }
 
-fn float_refusal(kind: &str) -> EncodeError {
+/// `what` names the refused value with its article, such as "an f32".
+fn float_refusal(what: &str) -> EncodeError {
     EncodeError(format!(
-        "a consumer value contains an {kind}; floating-point numbers have no canonical \
+        "a consumer value contains {what}; floating-point numbers have no canonical \
          encoding, so member identity, provenance, and retention types must encode them as \
          integers or strings"
     ))
+}
+
+/// The struct name serde_json gives a `Number` when its `arbitrary_precision`
+/// feature is on; the struct's one field, of the same name, holds the
+/// number's decimal text.
+///
+/// WARNING: this is serde_json's private serialization token. If serde_json
+/// renames it, such a number encodes as a one-entry map again, and the
+/// `serde_json_numbers_encode_alike_with_and_without_arbitrary_precision`
+/// test no longer describes serde_json.
+const SERDE_JSON_NUMBER: &str = "$serde_json::private::Number";
+
+/// The struct name serde_json gives a `RawValue`; its one field holds
+/// unparsed JSON text.
+const SERDE_JSON_RAW_VALUE: &str = "$serde_json::private::RawValue";
+
+/// The item a serde_json `Number` with decimal text `text` gets.
+///
+/// WHY: without `arbitrary_precision`, serde_json holds a number as a `u64`
+/// when it is a non-negative integer that fits one, as an `i64` when it is a
+/// negative integer that fits one, and as an `f64` otherwise, `-0` included;
+/// it serializes each through the matching serializer method. Writing the
+/// text the same way keeps the feature from changing a digest. The text must
+/// be exactly the integer's decimal form, so `01` or `+1` is refused rather
+/// than read as `1`.
+fn serde_json_number_item(text: &str) -> Result<Vec<u8>, EncodeError> {
+    if let Ok(value) = text.parse::<u64>()
+        && value.to_string() == text
+    {
+        return encode(&value);
+    }
+    if let Ok(value) = text.parse::<i64>()
+        && value < 0
+        && value.to_string() == text
+    {
+        return encode(&value);
+    }
+    Err(float_refusal(&format!(
+        "the serde_json number {text}, which is not a u64 or a negative i64 and so is a float \
+         in serde_json's default build"
+    )))
+}
+
+/// The UTF-8 text of an encoded `0x40` item, or `None` for any other item.
+fn decoded_str(item: &[u8]) -> Option<&str> {
+    let (&tag::STR, rest) = item.split_first()? else {
+        return None;
+    };
+    let (_, bytes) = rest.split_first_chunk::<8>()?;
+    std::str::from_utf8(bytes).ok()
 }
 
 impl Encoder<'_> {
@@ -293,18 +355,22 @@ impl Encoder<'_> {
         self.out.extend_from_slice(payload);
     }
 
-    fn length_prefixed(self, tag: u8, payload: &[u8]) {
+    fn length_prefixed(self, tag: u8, payload: &[u8]) -> Result<(), EncodeError> {
+        let length = count(payload.len())?;
         self.out.push(tag);
-        self.out.extend_from_slice(&count(payload.len()));
+        self.out.extend_from_slice(&length);
         self.out.extend_from_slice(payload);
+        Ok(())
     }
 
     /// Writes the `0x60` tag and the variant name that open a variant item.
-    fn open_variant(&mut self, variant: &str) {
+    fn open_variant(&mut self, variant: &str) -> Result<(), EncodeError> {
+        let length = count(variant.len())?;
         self.out.push(tag::VARIANT);
         self.out.push(tag::STR);
-        self.out.extend_from_slice(&count(variant.len()));
+        self.out.extend_from_slice(&length);
         self.out.extend_from_slice(variant.as_bytes());
+        Ok(())
     }
 }
 
@@ -316,7 +382,7 @@ impl<'a> ser::Serializer for Encoder<'a> {
     type SerializeTupleStruct = Seq<'a>;
     type SerializeTupleVariant = Seq<'a>;
     type SerializeMap = Map<'a>;
-    type SerializeStruct = Map<'a>;
+    type SerializeStruct = Struct<'a>;
     type SerializeStructVariant = Map<'a>;
 
     fn serialize_bool(self, value: bool) -> Result<(), EncodeError> {
@@ -375,11 +441,11 @@ impl<'a> ser::Serializer for Encoder<'a> {
     }
 
     fn serialize_f32(self, _value: f32) -> Result<(), EncodeError> {
-        Err(float_refusal("f32"))
+        Err(float_refusal("an f32"))
     }
 
     fn serialize_f64(self, _value: f64) -> Result<(), EncodeError> {
-        Err(float_refusal("f64"))
+        Err(float_refusal("an f64"))
     }
 
     fn serialize_char(self, value: char) -> Result<(), EncodeError> {
@@ -388,13 +454,11 @@ impl<'a> ser::Serializer for Encoder<'a> {
     }
 
     fn serialize_str(self, value: &str) -> Result<(), EncodeError> {
-        self.length_prefixed(tag::STR, value.as_bytes());
-        Ok(())
+        self.length_prefixed(tag::STR, value.as_bytes())
     }
 
     fn serialize_bytes(self, value: &[u8]) -> Result<(), EncodeError> {
-        self.length_prefixed(tag::BYTES, value);
-        Ok(())
+        self.length_prefixed(tag::BYTES, value)
     }
 
     fn serialize_none(self) -> Result<(), EncodeError> {
@@ -440,7 +504,7 @@ impl<'a> ser::Serializer for Encoder<'a> {
         variant: &'static str,
         value: &T,
     ) -> Result<(), EncodeError> {
-        self.open_variant(variant);
+        self.open_variant(variant)?;
         value.serialize(self)
     }
 
@@ -467,7 +531,7 @@ impl<'a> ser::Serializer for Encoder<'a> {
         variant: &'static str,
         _len: usize,
     ) -> Result<Seq<'a>, EncodeError> {
-        self.open_variant(variant);
+        self.open_variant(variant)?;
         Ok(Seq::new(self.out))
     }
 
@@ -475,8 +539,19 @@ impl<'a> ser::Serializer for Encoder<'a> {
         Ok(Map::new(self.out))
     }
 
-    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<Map<'a>, EncodeError> {
-        Ok(Map::new(self.out))
+    fn serialize_struct(self, name: &'static str, _len: usize) -> Result<Struct<'a>, EncodeError> {
+        match name {
+            SERDE_JSON_NUMBER => Ok(Struct::SerdeJsonNumber {
+                out: self.out,
+                text: None,
+            }),
+            SERDE_JSON_RAW_VALUE => Err(EncodeError(
+                "a consumer value contains a serde_json RawValue; unparsed JSON text has no \
+                 canonical encoding"
+                    .to_owned(),
+            )),
+            _ => Ok(Struct::Fields(Map::new(self.out))),
+        }
     }
 
     fn serialize_struct_variant(
@@ -486,7 +561,7 @@ impl<'a> ser::Serializer for Encoder<'a> {
         variant: &'static str,
         _len: usize,
     ) -> Result<Map<'a>, EncodeError> {
-        self.open_variant(variant);
+        self.open_variant(variant)?;
         Ok(Map::new(self.out))
     }
 }
@@ -496,6 +571,12 @@ impl<'a> ser::Serializer for Encoder<'a> {
 ///
 /// WHY buffered: `serialize_seq` may be called without a length, and the
 /// count precedes the elements.
+///
+/// PERF: this body, and each map's entries, are copied once more into the
+/// enclosing item, so a deeply nested byte is copied once per level and the
+/// whole canonical item is held in memory before it is hashed. Streaming
+/// heurēma's own levels into the hasher is tracked in #58; the grammar does
+/// not change.
 struct Seq<'a> {
     out: &'a mut Vec<u8>,
     elements: usize,
@@ -519,10 +600,12 @@ impl<'a> Seq<'a> {
         Ok(())
     }
 
-    fn finish(self) {
+    fn finish(self) -> Result<(), EncodeError> {
+        let elements = count(self.elements)?;
         self.out.push(tag::SEQ);
-        self.out.extend_from_slice(&count(self.elements));
+        self.out.extend_from_slice(&elements);
         self.out.extend_from_slice(&self.body);
+        Ok(())
     }
 }
 
@@ -535,8 +618,7 @@ impl ser::SerializeSeq for Seq<'_> {
     }
 
     fn end(self) -> Result<(), EncodeError> {
-        self.finish();
-        Ok(())
+        self.finish()
     }
 }
 
@@ -549,8 +631,7 @@ impl ser::SerializeTuple for Seq<'_> {
     }
 
     fn end(self) -> Result<(), EncodeError> {
-        self.finish();
-        Ok(())
+        self.finish()
     }
 }
 
@@ -563,8 +644,7 @@ impl ser::SerializeTupleStruct for Seq<'_> {
     }
 
     fn end(self) -> Result<(), EncodeError> {
-        self.finish();
-        Ok(())
+        self.finish()
     }
 }
 
@@ -577,8 +657,7 @@ impl ser::SerializeTupleVariant for Seq<'_> {
     }
 
     fn end(self) -> Result<(), EncodeError> {
-        self.finish();
-        Ok(())
+        self.finish()
     }
 }
 
@@ -635,8 +714,9 @@ impl<'a> Map<'a> {
         if self.entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
             return Err(EncodeError("a map emits the same key twice".to_owned()));
         }
+        let entries = count(self.entries.len())?;
         self.out.push(tag::MAP);
-        self.out.extend_from_slice(&count(self.entries.len()));
+        self.out.extend_from_slice(&entries);
         for (key, value) in &self.entries {
             self.out.extend_from_slice(key);
             self.out.extend_from_slice(value);
@@ -662,7 +742,18 @@ impl SerializeMap for Map<'_> {
     }
 }
 
-impl SerializeStruct for Map<'_> {
+/// A struct being written: an ordinary struct is a `0x51` item of its
+/// fields; serde_json's arbitrary-precision number is the integer item of
+/// its text.
+enum Struct<'a> {
+    Fields(Map<'a>),
+    SerdeJsonNumber {
+        out: &'a mut Vec<u8>,
+        text: Option<String>,
+    },
+}
+
+impl SerializeStruct for Struct<'_> {
     type Ok = ();
     type Error = EncodeError;
 
@@ -671,12 +762,39 @@ impl SerializeStruct for Map<'_> {
         name: &'static str,
         value: &T,
     ) -> Result<(), EncodeError> {
-        self.key(name)?;
-        self.value(value)
+        match self {
+            Self::Fields(map) => {
+                map.key(name)?;
+                map.value(value)
+            }
+            Self::SerdeJsonNumber { text, .. } => {
+                let item = encode(value)?;
+                match (name, decoded_str(&item), text.is_none()) {
+                    (SERDE_JSON_NUMBER, Some(decimal), true) => {
+                        *text = Some(decimal.to_owned());
+                        Ok(())
+                    }
+                    _ => Err(EncodeError(
+                        "a serde_json number did not serialize as one decimal string".to_owned(),
+                    )),
+                }
+            }
+        }
     }
 
     fn end(self) -> Result<(), EncodeError> {
-        self.finish()
+        match self {
+            Self::Fields(map) => map.finish(),
+            Self::SerdeJsonNumber { out, text } => {
+                let Some(text) = text else {
+                    return Err(EncodeError(
+                        "a serde_json number did not serialize as one decimal string".to_owned(),
+                    ));
+                };
+                out.extend_from_slice(&serde_json_number_item(&text)?);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -714,12 +832,8 @@ mod tests {
     }
 
     fn string(value: &str) -> Vec<u8> {
-        [
-            vec![0x40],
-            len(value.len() as u64),
-            value.as_bytes().to_vec(),
-        ]
-        .concat()
+        let length = u64::try_from(value.len()).expect("a test string's length fits a u64");
+        [vec![0x40], len(length), value.as_bytes().to_vec()].concat()
     }
 
     fn item<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
@@ -977,6 +1091,97 @@ mod tests {
                 )
             );
         }
+    }
+
+    /// Serializes as serde_json serializes a `Number` when its
+    /// `arbitrary_precision` feature is on.
+    struct ArbitraryPrecisionNumber(&'static str);
+
+    impl Serialize for ArbitraryPrecisionNumber {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut number = serializer.serialize_struct(SERDE_JSON_NUMBER, 1)?;
+            number.serialize_field(SERDE_JSON_NUMBER, self.0)?;
+            number.end()
+        }
+    }
+
+    /// Serializes as serde_json serializes a `RawValue`.
+    struct RawJson(&'static str);
+
+    impl Serialize for RawJson {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut raw = serializer.serialize_struct(SERDE_JSON_RAW_VALUE, 1)?;
+            raw.serialize_field(SERDE_JSON_RAW_VALUE, self.0)?;
+            raw.end()
+        }
+    }
+
+    #[test]
+    fn serde_json_numbers_encode_alike_with_and_without_arbitrary_precision() {
+        // Each text is parsed by serde_json as this build links it, and also
+        // written in arbitrary_precision's form; both must give one outcome.
+        let texts = [
+            "0",
+            "7",
+            "18446744073709551615",
+            "-3",
+            "-9223372036854775808",
+            "-0",
+            "1.5",
+            "1e3",
+            "18446744073709551616",
+            "-9223372036854775809",
+        ];
+        for text in texts {
+            let parsed: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+            let default_build = encode(&parsed).map_err(|error| error.to_string());
+            let arbitrary =
+                encode(&ArbitraryPrecisionNumber(text)).map_err(|error| error.to_string());
+            match (default_build, arbitrary) {
+                (Ok(default_item), Ok(arbitrary_item)) => {
+                    assert_eq!(default_item, arbitrary_item, "{text}");
+                }
+                (Err(default_refusal), Err(arbitrary_refusal)) => {
+                    for message in [default_refusal, arbitrary_refusal] {
+                        assert!(
+                            message.contains("floating-point numbers have no canonical encoding"),
+                            "{text}: {message}"
+                        );
+                    }
+                }
+                (default_build, arbitrary) => {
+                    panic!(
+                        "{text}: default build {default_build:?}, arbitrary precision {arbitrary:?}"
+                    )
+                }
+            }
+        }
+        assert_eq!(item(&ArbitraryPrecisionNumber("7")), item(&7_u64));
+        assert_eq!(item(&ArbitraryPrecisionNumber("-3")), item(&-3_i64));
+
+        // Not serde_json's spelling of any integer, so not read as one.
+        for text in ["01", "+1", "-01", ""] {
+            let message = refusal(&ArbitraryPrecisionNumber(text));
+            assert!(
+                message.contains("floating-point numbers"),
+                "{text:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn serde_json_raw_json_text_is_refused() {
+        let message = refusal(&RawJson("{\"b\":1,\"a\":2}"));
+        assert!(message.contains("serde_json RawValue"), "{message}");
+    }
+
+    #[test]
+    fn sequences_keep_their_emission_order() {
+        assert_ne!(
+            item(&vec![1_u8, 2]),
+            item(&vec![2_u8, 1]),
+            "a sequence is ordered data; only map entries are sorted"
+        );
     }
 
     #[test]

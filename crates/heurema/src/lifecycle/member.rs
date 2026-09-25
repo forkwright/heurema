@@ -19,9 +19,14 @@ use crate::SnapshotFamily;
 /// because index engines and version payloads key their maps by it, and its
 /// encoding must be injective and consistent with its `Eq` and `Ord`. Two
 /// distinct identities that encode alike would collapse into one map key and
-/// lose a member without an error. Validation refuses an identity that does
-/// not encode as a string or integer with
+/// lose a member without an error. It must also read back as itself from a
+/// JSON object key. serde_json writes an integer key as its decimal digits,
+/// so an untagged enum that reads digits back as a string variant breaks
+/// this. Validation refuses an identity that does not encode as a string or
+/// integer, or that does not survive that round trip, with
 /// [`HeuremaError::InvalidIdentifier`](crate::HeuremaError::InvalidIdentifier).
+/// Injectivity and agreement with `Ord` cannot be checked from one value and
+/// are the implementor's to keep.
 ///
 /// WHY not blanket-implemented: a blanket impl would let a bare `u64` or
 /// `String` stand in for a member identity. Without one, the orphan rule
@@ -36,6 +41,14 @@ pub trait MemberIdentity: Ord + Hash + Clone + fmt::Debug + Serialize + Deserial
 /// provenance shape: it stores and returns the consumer's value, and never
 /// interprets it.
 ///
+/// Contract: equal values must serialize identically, because an
+/// operation's digest hashes what `Serialize` emits (the grammar is on
+/// [`OperationDigest`](crate::OperationDigest)). Map entries are sorted
+/// before hashing, but a sequence is hashed in the order it is emitted: hold
+/// a set as a `BTreeSet` or a sorted `Vec`, never a `HashSet`. Floats, and
+/// serde_json's `RawValue`, are refused with
+/// [`HeuremaError::UnencodableOperation`](crate::HeuremaError::UnencodableOperation).
+///
 /// WHY not blanket-implemented: provenance is required on every member, and
 /// a blanket impl would let `()` or a bare `String` satisfy that requirement
 /// while recording nothing. Without one, the orphan rule makes the consumer
@@ -48,6 +61,9 @@ pub trait ProvenanceReference: Clone + Eq + fmt::Debug + Serialize + Deserialize
 /// The consumer implements this marker on its own newtype. heurēma defines no
 /// retention shape: it stores the consumer's value with the destroyed index's
 /// record, and never interprets it.
+///
+/// Contract: as for [`ProvenanceReference`], equal values must serialize
+/// identically, since the Destroy operation's digest hashes this value.
 ///
 /// WHY not blanket-implemented: physical deletion requires a retention
 /// decision, and a blanket impl would let `()` stand in for one. Without one,

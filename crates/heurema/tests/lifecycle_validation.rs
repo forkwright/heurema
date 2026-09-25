@@ -60,6 +60,19 @@ struct NamedMember(String);
 
 impl MemberIdentity for NamedMember {}
 
+/// test-local placeholder; heurēma defines no provenance shape. An untagged
+/// identity with an integer and a string variant: every value encodes as an
+/// integer or a string, but serde_json writes an integer key as its digits
+/// and reads those digits back as the string variant.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+enum MixedMember {
+    Number(u64),
+    Text(String),
+}
+
+impl MemberIdentity for MixedMember {}
+
 /// test-local placeholder; heurēma defines no provenance shape. Provenance
 /// whose serialized form holds a float, which has no canonical encoding.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -434,6 +447,83 @@ fn member_identity_that_is_not_a_json_key_is_refused() -> Result<(), HeuremaErro
 }
 
 #[test]
+fn member_identity_that_does_not_survive_a_json_key_round_trip_is_refused()
+-> Result<(), HeuremaError> {
+    let error = refused(check(ChangeOf::<MixedMember>::Remove {
+        members: vec![
+            MixedMember::Text("doc-7".to_owned()),
+            MixedMember::Number(7),
+        ],
+    }));
+    let HeuremaError::InvalidIdentifier {
+        kind,
+        value,
+        reason,
+        ..
+    } = &error
+    else {
+        panic!("unexpected {error:?}");
+    };
+    assert_eq!(*kind, IdentifierKind::MemberIdentity, "{error}");
+    assert_eq!(value, "Number(7)", "{error}");
+    assert!(
+        reason.starts_with(r#"reads back from the JSON object {"7":0} as a different identity"#),
+        "{error}"
+    );
+
+    let text_only = check(ChangeOf::<MixedMember>::Remove {
+        members: vec![MixedMember::Text("doc-7".to_owned())],
+    })?;
+    assert_eq!(
+        text_only.identity().key.as_str(),
+        "op-1",
+        "a value of the same type that round-trips is accepted"
+    );
+    Ok(())
+}
+
+#[test]
+fn record_of_another_index_is_refused_before_the_permission_table() -> Result<(), HeuremaError> {
+    let other = IndexIdentity::new(
+        OwnerNamespace::try_from("example")?,
+        IndexName::try_from("drafts")?,
+    );
+    let mut foreign = active(vector_config(2))?;
+    foreign.identity = other.clone();
+
+    let error = refused(
+        check(Change::Insert {
+            members: vec![vector(1, &[0.0, 1.0])],
+        })?
+        .permit(Some(&foreign)),
+    );
+    let HeuremaError::RecordMismatch {
+        expected, actual, ..
+    } = &error
+    else {
+        panic!("unexpected {error:?}");
+    };
+    assert_eq!(expected, &index()?, "{error}");
+    assert_eq!(actual, &other, "{error}");
+
+    // Create is forbidden on the foreign record's Destroyed state; the
+    // mismatch is reported first, because that state is not this index's.
+    let mut foreign_destroyed = destroyed(vector_config(2))?;
+    foreign_destroyed.identity = other;
+    let error = refused(
+        check(Change::Create {
+            config: vector_config(2),
+        })?
+        .permit(Some(&foreign_destroyed)),
+    );
+    assert!(
+        matches!(error, HeuremaError::RecordMismatch { .. }),
+        "{error:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn unencodable_provenance_is_refused() {
     let error = refused(check(ChangeOf::<TestMember, WeightedProvenance>::Insert {
         members: vec![IndexMember::new(
@@ -702,6 +792,22 @@ fn refusals_are_categorised_as_refused() -> Result<(), HeuremaError> {
                 members: vec![vector(1, &[0.0])],
             })?
             .permit(None),
+        ),
+        refused(check(ChangeOf::<MixedMember>::Remove {
+            members: vec![MixedMember::Number(7)],
+        })),
+        refused(
+            check(Change::Insert {
+                members: vec![vector(1, &[0.0, 1.0])],
+            })?
+            .permit(Some(&{
+                let mut foreign = active(vector_config(2))?;
+                foreign.identity = IndexIdentity::new(
+                    OwnerNamespace::try_from("example")?,
+                    IndexName::try_from("drafts")?,
+                );
+                foreign
+            })),
         ),
         refused(check(ChangeOf::<TestMember, WeightedProvenance>::Insert {
             members: vec![IndexMember::new(

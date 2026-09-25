@@ -256,6 +256,23 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
+    /// WHY: `permit` checks an operation against the record its caller read.
+    /// A record for another index would check the transition and the
+    /// members against the wrong state and configuration, so it is refused
+    /// rather than trusted.
+    #[snafu(display(
+        "operation on index {expected} was checked against the record of index {actual}"
+    ))]
+    RecordMismatch {
+        /// The index the operation targets.
+        expected: IndexIdentity,
+        /// The index the supplied record describes.
+        actual: IndexIdentity,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
     /// WHY: an operation's digest is computed over a canonical encoding that
     /// admits no floating-point numbers and only string or integer map keys.
     /// A consumer member identity, provenance, or retention value outside
@@ -318,6 +335,7 @@ impl HeuremaError {
             | Self::DuplicateMember { .. }
             | Self::EmptyBatch { .. }
             | Self::TransitionNotPermitted { .. }
+            | Self::RecordMismatch { .. }
             | Self::UnencodableOperation { .. } => ErrorCategory::Refused,
             Self::IndexNotFound { .. } => ErrorCategory::NotFound,
             Self::NotYetImplemented { .. } | Self::UnsupportedSnapshotVersion { .. } => {
@@ -387,6 +405,11 @@ mod tests {
                 state: IndexStateKind::Destroyed,
             }
             .build(),
+            RecordMismatchSnafu {
+                expected: sample_index(),
+                actual: other_index(),
+            }
+            .build(),
             UnencodableOperationSnafu { reason: "f64" }.build(),
         ]
     }
@@ -395,6 +418,16 @@ mod tests {
         let (Ok(namespace), Ok(name)) = (
             crate::OwnerNamespace::try_from("example"),
             crate::IndexName::try_from("notes"),
+        ) else {
+            panic!("sample identifiers are grammar-conformant");
+        };
+        IndexIdentity::new(namespace, name)
+    }
+
+    fn other_index() -> IndexIdentity {
+        let (Ok(namespace), Ok(name)) = (
+            crate::OwnerNamespace::try_from("example"),
+            crate::IndexName::try_from("drafts"),
         ) else {
             panic!("sample identifiers are grammar-conformant");
         };
@@ -431,6 +464,7 @@ mod tests {
             HeuremaError::TransitionNotPermitted { .. } => {
                 ("TransitionNotPermitted", ErrorCategory::Refused)
             }
+            HeuremaError::RecordMismatch { .. } => ("RecordMismatch", ErrorCategory::Refused),
             HeuremaError::UnencodableOperation { .. } => {
                 ("UnencodableOperation", ErrorCategory::Refused)
             }
@@ -462,6 +496,7 @@ mod tests {
                 "InvalidVector",
                 "NotYetImplemented",
                 "Persistence",
+                "RecordMismatch",
                 "SnapshotFormat",
                 "TransitionNotPermitted",
                 "UnencodableOperation",
@@ -532,6 +567,15 @@ mod tests {
                 }
                 .build(),
                 "Insert is not permitted on index example/notes in state Absent",
+            ),
+            (
+                RecordMismatchSnafu {
+                    expected: sample_index(),
+                    actual: other_index(),
+                }
+                .build(),
+                "operation on index example/notes was checked against the record of index \
+                 example/drafts",
             ),
             (
                 UnencodableOperationSnafu {

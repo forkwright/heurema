@@ -460,7 +460,7 @@ impl fmt::Display for IndexVersion {
 /// | i8, i16, i32, i64, i128 | `0x18`, `0x19`, `0x1a`, `0x1b`, `0x1c` | the value in 1, 2, 4, 8, or 16 bytes, two's complement, big-endian |
 /// | str, char, unit variant | `0x40` | byte length, then the exact UTF-8 bytes, unnormalised; a unit variant is its name |
 /// | bytes | `0x41` | length, then the bytes |
-/// | seq, tuple, tuple struct | `0x50` | element count, then each element's item in order |
+/// | seq, tuple, tuple struct | `0x50` | element count, then each element's item in the order emitted |
 /// | map, struct | `0x51` | entry count, then each entry's key item and value item, ascending by the key item's bytes |
 /// | newtype variant | `0x60` | the variant name as a `0x40` item, then the value's item |
 /// | tuple variant | `0x60` | the variant name as a `0x40` item, then its fields as one `0x50` item |
@@ -474,12 +474,22 @@ impl fmt::Display for IndexVersion {
 /// - Map entries are sorted by the bytes of the encoded key item, so string
 ///   keys order by byte length first and then bytewise. The source map's
 ///   iteration order, a `HashMap`'s included, never reaches the digest.
+/// - A sequence is not sorted: its elements are hashed in the order its
+///   `Serialize` emits them, since order is part of a list's value. A
+///   `HashSet` in `M`, `P`, or `R` emits in a per-process order and so has no
+///   stable digest; the marker traits' contracts rule it out.
 /// - A map key must encode as a `0x40` item or an integer item. Any other
 ///   key, or one key emitted twice, is refused with
 ///   [`HeuremaError::UnencodableOperation`].
 /// - A floating-point number anywhere in `M`, `P`, or `R` is refused with
 ///   [`HeuremaError::UnencodableOperation`]: its decimal form depends on the
 ///   formatter a build links, and NaN has more than one bit pattern.
+/// - A `serde_json::Number` encodes as the item serde_json's default build
+///   gives it (`0x13` for a non-negative integer that fits a `u64`, `0x1b`
+///   for a negative one that fits an `i64`, refused as a float otherwise),
+///   including when a build unifies serde_json's `arbitrary_precision`
+///   feature on. A `serde_json::value::RawValue` is refused: unparsed JSON
+///   text has no canonical form.
 /// - The encoder reports itself human-readable, so a type that serializes
 ///   differently for human-readable formats (as JSON is) takes that form.
 ///

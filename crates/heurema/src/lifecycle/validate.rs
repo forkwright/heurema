@@ -2,6 +2,8 @@
 //! by its stateless checks, then into a [`ValidatedOperation`] by the
 //! permission table and the checks that need the index's current record.
 
+use std::collections::BTreeMap;
+
 use snafu::ensure;
 
 use super::digest;
@@ -13,7 +15,8 @@ use super::operation::{IndexChange, IndexConfig, LifecycleOperation, LifecycleTr
 use super::record::{IndexRecord, IndexStateKind};
 use crate::HeuremaError;
 use crate::error::{
-    DuplicateMemberSnafu, EmptyBatchSnafu, FamilyMismatchSnafu, TransitionNotPermittedSnafu,
+    DuplicateMemberSnafu, EmptyBatchSnafu, FamilyMismatchSnafu, RecordMismatchSnafu,
+    TransitionNotPermittedSnafu,
 };
 use crate::fts::require_simple_pipeline;
 use crate::hnsw::{check_config, check_finite, check_vector};
@@ -28,10 +31,11 @@ use crate::hnsw::{check_config, check_finite, check_vector};
 ///    ([`HeuremaError::EmptyBatch`]);
 /// 2. a batch that names one member identity twice
 ///    ([`HeuremaError::DuplicateMember`]);
-/// 3. a member identity that does not encode as a string or an integer
+/// 3. a member identity that does not encode as a string or an integer, or
+///    that does not read back as itself from a JSON object key
 ///    ([`HeuremaError::InvalidIdentifier`] of kind
-///    [`IdentifierKind::MemberIdentity`]), because engine snapshots key
-///    members by identity;
+///    [`IdentifierKind::MemberIdentity`]), because engine snapshots and the
+///    adapters' JSON encoding key members by identity;
 /// 4. a vector with a NaN or infinite component
 ///    ([`HeuremaError::InvalidVector`]);
 /// 5. a Create or Rebuild configuration the engine refuses: an HNSW
@@ -187,14 +191,16 @@ impl<M: MemberIdentity, P: ProvenanceReference, R: RetentionReference> CheckedOp
     ///
     /// It refuses, in this order:
     ///
-    /// 1. a transition the permission table forbids from the current state
+    /// 1. a record whose identity is not the operation's index
+    ///    ([`HeuremaError::RecordMismatch`]);
+    /// 2. a transition the permission table forbids from the current state
     ///    ([`HeuremaError::TransitionNotPermitted`]; see
     ///    [`LifecycleTransition::is_permitted_from`]);
-    /// 2. an Insert member the current configuration cannot hold: first any
+    /// 3. an Insert member the current configuration cannot hold: first any
     ///    member of the other family ([`HeuremaError::FamilyMismatch`]),
     ///    checked for every member before any member's dimension, then a
     ///    vector of the wrong dimension ([`HeuremaError::DimensionMismatch`]);
-    /// 3. a Rebuild whose configuration changes the index's family
+    /// 4. a Rebuild whose configuration changes the index's family
     ///    ([`HeuremaError::FamilyMismatch`]), since a named index keeps one
     ///    family for life.
     ///
@@ -205,6 +211,15 @@ impl<M: MemberIdentity, P: ProvenanceReference, R: RetentionReference> CheckedOp
         self,
         current: Option<&IndexRecord<R>>,
     ) -> Result<ValidatedOperation<M, P, R>, HeuremaError> {
+        if let Some(record) = current {
+            ensure!(
+                record.identity == self.operation.index,
+                RecordMismatchSnafu {
+                    expected: self.operation.index.clone(),
+                    actual: record.identity.clone(),
+                }
+            );
+        }
         let from = current.map_or(IndexStateKind::Absent, |record| record.state.kind());
         let transition = self.operation.transition();
         ensure!(
@@ -286,7 +301,7 @@ where
     }
 }
 
-/// The checks that need the index's current configuration, steps 2 and 3 of
+/// The checks that need the index's current configuration, steps 3 and 4 of
 /// [`CheckedOperation::permit`].
 fn check_against_record<M, P, R>(
     change: &IndexChange<M, P, R>,
@@ -327,7 +342,8 @@ fn member_ids<'a, M, P>(members: &[&'a IndexMember<M, P>]) -> Vec<&'a M> {
     members.iter().map(|member| &member.id).collect()
 }
 
-/// Steps 2 and 3: no identity twice, and each one a string or an integer.
+/// Steps 2 and 3: no identity twice, and each one a string or an integer
+/// that reads back as itself from a JSON object key.
 ///
 /// INVARIANT: `sorted_ids` ascends, so equal identities are adjacent.
 fn check_member_identities<M: MemberIdentity>(sorted_ids: &[&M]) -> Result<(), HeuremaError> {
@@ -343,7 +359,8 @@ fn check_member_identities<M: MemberIdentity>(sorted_ids: &[&M]) -> Result<(), H
         .fail();
     }
     for id in sorted_ids {
-        if let Some(reason) = digest::member_identity_refusal(id) {
+        if let Some(reason) = digest::member_identity_refusal(id).or_else(|| json_key_refusal(*id))
+        {
             return Err(identity::refusal(
                 IdentifierKind::MemberIdentity,
                 &format!("{id:?}"),
@@ -352,6 +369,37 @@ fn check_member_identities<M: MemberIdentity>(sorted_ids: &[&M]) -> Result<(), H
         }
     }
     Ok(())
+}
+
+/// Why `id` does not survive a round trip through a JSON object key, or
+/// `None` when it does.
+///
+/// WHY: both adapters encode through `serde_json`, and engine snapshots hold
+/// their members in maps keyed by identity, which JSON writes as objects. A
+/// JSON object key is always a string: serde_json writes an integer key as
+/// its decimal digits and reads it back through the identity's own
+/// `Deserialize`. An identity that reads those digits back as another value,
+/// such as an untagged enum with an integer and a string variant, would load
+/// as a different member than was stored.
+fn json_key_refusal<M: MemberIdentity>(id: &M) -> Option<String> {
+    let stored = match serde_json::to_string(&BTreeMap::from([(id, 0_u8)])) {
+        Ok(stored) => stored,
+        Err(error) => return Some(format!("cannot be written as a JSON object key: {error}")),
+    };
+    // WHY `reported`: the refusal already carries the identity truncated to
+    // 64 characters, and the JSON text would repeat it in full.
+    match serde_json::from_str::<BTreeMap<M, u8>>(&stored) {
+        Ok(read) if read.len() == 1 && read.contains_key(id) => None,
+        Ok(_) => Some(format!(
+            "reads back from the JSON object {} as a different identity; adapters store \
+             members in JSON objects keyed by identity",
+            identity::reported(&stored)
+        )),
+        Err(error) => Some(format!(
+            "cannot be read back from the JSON object {}: {error}",
+            identity::reported(&stored)
+        )),
+    }
 }
 
 /// Step 4: every vector component is finite.

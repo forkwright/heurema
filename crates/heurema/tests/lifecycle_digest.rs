@@ -129,6 +129,13 @@ struct IntegerKeyedProvenance(BTreeMap<u64, u32>);
 
 impl ProvenanceReference for IntegerKeyedProvenance {}
 
+/// test-local placeholder; heurēma defines no provenance shape. Source
+/// references in the order the consumer recorded them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ListedProvenance(Vec<u32>);
+
+impl ProvenanceReference for ListedProvenance {}
+
 type Change = IndexChange<TestMember, PlaceholderProvenance, PlaceholderRetention>;
 type ChangeOf<P, R> = IndexChange<TestMember, P, R>;
 
@@ -138,7 +145,10 @@ const DOMAIN: &[u8] = b"heurema.lifecycle.operation.v1\n";
 // The grammar's items, written from `OperationDigest`'s rustdoc.
 
 fn count(value: usize) -> Vec<u8> {
-    (value as u64).to_be_bytes().to_vec()
+    let Ok(length) = u64::try_from(value) else {
+        panic!("a test length of {value} does not fit a u64");
+    };
+    length.to_be_bytes().to_vec()
 }
 
 fn string(value: &str) -> Vec<u8> {
@@ -521,6 +531,27 @@ fn map_entry_order_in_provenance_does_not_change_the_digest() -> Result<(), Heur
         ascending.to_string(),
         "95e26ef97814cbf356543f666f0ff429b7ddd5a4115bf6cab005e646a1f3c072",
         "pinned digest"
+    );
+    Ok(())
+}
+
+#[test]
+fn sequence_order_in_provenance_changes_the_digest() -> Result<(), HeuremaError> {
+    // WHY: unlike map entries, a sequence is hashed in the order it is
+    // emitted, so provenance must not hold a `HashSet` (see the contract on
+    // `ProvenanceReference`).
+    let digest = |order: Vec<u32>| {
+        digest_of(
+            "k",
+            ChangeOf::<_, PlaceholderRetention>::Insert {
+                members: vec![member_with(ListedProvenance(order))],
+            },
+        )
+    };
+    assert_ne!(
+        digest(vec![1, 2])?,
+        digest(vec![2, 1])?,
+        "two orders of one list are two operations"
     );
     Ok(())
 }
