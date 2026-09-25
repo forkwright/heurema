@@ -25,10 +25,17 @@ struct DocumentTerms {
 /// `Simple` splits on every character for which [`char::is_alphanumeric`] is
 /// false and discards the empty pieces; only then does it lowercase each
 /// remaining token, as a whole, with [`str::to_lowercase`]. Context-dependent
-/// mappings such as the Greek final sigma therefore resolve within the token,
-/// and a lowercase mapping that yields a non-alphanumeric character (`İ`
-/// becomes `i` plus U+0307) keeps it inside the token. The pipeline applies no
-/// accent folding or stop-word filtering. Queries use the same pipeline.
+/// mappings such as the Greek final sigma therefore resolve within the token.
+/// The pipeline applies no accent folding, Unicode normalization, or stop-word
+/// filtering. Queries use the same pipeline.
+///
+/// WARNING: two consequences of split-then-lowercase are known limitations,
+/// not design goals. A lowercase mapping that yields a non-alphanumeric
+/// character keeps it inside the token (`İ` becomes `i` plus U+0307), so the
+/// pipeline is not idempotent on its own output. Combining marks are not
+/// alphanumeric, so decomposed text splits inside words. Changing either
+/// changes which documents match, and persisted snapshots store tokenized
+/// terms, so that change is a deliberate, versioned decision.
 ///
 /// # Scoring
 ///
@@ -45,8 +52,10 @@ struct DocumentTerms {
 /// - `k1 = 1.2` and `b = 0.75`.
 /// - `N` is the number of live documents and `n(t)` the number of live
 ///   documents containing `t` at least once. The idf is the non-negative
-///   variant of the Robertson/Spärck Jones weight: it is positive for every
-///   `n(t)` in `1..=N`, including terms present in more than half the corpus.
+///   variant of the Robertson/Spärck Jones weight: in exact arithmetic it is
+///   positive for every `n(t)` in `1..=N`, including terms present in more
+///   than half the corpus. The `f32` evaluation can round it to zero once `N`
+///   exceeds about 2^23.
 /// - `tf(t, d)` counts the occurrences of token `t` in `d`. `|d|` is the
 ///   number of tokens `d` yields, repeats included, and `avgdl` is the sum of
 ///   `|d|` over the live documents divided by `N`. A document that yields no

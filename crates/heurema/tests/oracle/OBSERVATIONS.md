@@ -62,10 +62,10 @@ Gathered from test and file names on the pinned tree's public test surface.
 | HNSW result-cache eviction and retention | not covered — an engine-internal choice; the trait exposes no cache |
 | Storage-backed close/reopen preserves recall | not oracle territory — owned by the `PersistenceBackend` contract tests (`persistence_contract.rs`, the adapter test suites) |
 
-## Deliberately unpinned
+## Pinned here, not against krites
 
 Parity with krites is property-level, not bit-exact score equality
-(`tests/oracle/PARITY.md`): heurēma does not match krites' idf variant or k1/b.
+(`tests/oracle/PARITY.md`): heurēma does not aim to reproduce krites' scores.
 heurēma's own choices are pinned instead: the `Bm25Index` rustdoc states
 k1 = 1.2, b = 0.75, and the non-negative idf, and `bm25_formula` fails if the
 engine departs from them. The tokenizer argument value model

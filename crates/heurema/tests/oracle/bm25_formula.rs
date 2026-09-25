@@ -108,11 +108,22 @@ const CONTRACT: Reference = Reference {
 
 /// One deviation from the contract per entry. Each names a documented clause
 /// the generated workloads must be able to tell apart from the contract.
-const PERTURBATIONS: [(&str, Reference); 10] = [
+const PERTURBATIONS: [(&str, Reference); 11] = [
     (
         "k1 = 1.25",
         Reference {
             k1: 1.25,
+            ..CONTRACT
+        },
+    ),
+    // WHY: a fine sentinel. Every other perturbation is coarse enough to pass
+    // even under a tolerance loosened a hundredfold; this one is detected at
+    // the derived bound and stops being detected near ten times it, so a
+    // loosened tolerance fails this test instead of passing silently.
+    (
+        "k1 = 1.2001",
+        Reference {
+            k1: 1.2001,
             ..CONTRACT
         },
     ),
@@ -984,7 +995,10 @@ fn comparator_rejects_results_that_break_the_reference_ranking() -> Result<(), H
     foreign[2].0 = 4;
     let mut duplicated = all.clone();
     duplicated[2].0 = 1;
+    let mut twin_split = all.clone();
+    twin_split[2].1 = f32::from_bits(all[1].1.to_bits() - 1);
     let full_rankings = [
+        ("identical-input documents one ulp apart", twin_split),
         ("tied documents in descending ID order", tie_reversed),
         ("IDs swapped across a clear score gap", misranked),
         ("a score twice the tolerance off", drifted),
