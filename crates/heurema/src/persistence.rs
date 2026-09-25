@@ -10,8 +10,16 @@ use crate::{FtsIndex, HeuremaError, PersistenceSource, VectorIndex};
 pub const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 
 /// The index family whose payload an adapter snapshot contains.
+///
+/// The same discriminant names a lifecycle index's family
+/// ([`IndexConfig::family`](crate::IndexConfig::family)), and so which
+/// [`MemberContent`](crate::MemberContent) the index accepts.
+///
+/// WHY `#[non_exhaustive]`: a new index family must be addable without
+/// breaking every consumer that matches on this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub enum SnapshotFamily {
     /// A [`VectorIndex`] payload.
     Vector,

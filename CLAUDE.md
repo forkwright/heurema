@@ -25,9 +25,12 @@ Particularly relevant:
 
 ```
 Cargo.toml           # workspace root
-crates/heurema/      # traits, HNSW + BM25 engines, RRF, snapshot envelope
+crates/heurema/      # traits, HNSW + BM25 engines, RRF, snapshot envelope,
+                     # durable-lifecycle vocabulary
   src/               # lib.rs, error.rs, fts.rs (+ fts/bm25.rs),
-                     # hnsw.rs (+ hnsw/engine.rs), persistence.rs, rrf.rs
+                     # hnsw.rs (+ hnsw/engine.rs), lifecycle.rs (+ lifecycle/
+                     # identity.rs, member.rs, operation.rs, record.rs),
+                     # persistence.rs, rrf.rs
   tests/             # api_smoke.rs, bm25_lifecycle.rs, bm25_snapshot.rs,
                      # index_rrf_composition.rs, oracle/,
                      # persistence_contract.rs, persistence_schema_closed.rs,
@@ -56,7 +59,8 @@ cargo test --workspace
 
 ## Patterns
 
-- **Errors:** one `snafu` enum, `HeuremaError` (`#[non_exhaustive]`), with `#[snafu(implicit)] location` on every variant. Inside `heurema`, errors are mostly built through context selectors (`SnapshotFormatSnafu { .. }.build()`, `ensure!`). The selectors are unreachable outside the crate (`mod error` is private), so `persistence.rs`'s decode helper and the adapter crates construct variants directly with `location: std::panic::Location::caller()`. `PersistenceSource` type-erases only at the backend boundary.
+- **Errors:** one `snafu` enum, `HeuremaError` (`#[non_exhaustive]`), with `#[snafu(implicit)] location` on every variant. Inside `heurema`, errors are mostly built through context selectors (`SnapshotFormatSnafu { .. }.build()`, `ensure!`). The selectors are unreachable outside the crate (`mod error` is private), so `persistence.rs`'s decode helper and the adapter crates construct variants directly with `location: std::panic::Location::caller()`. `PersistenceSource` type-erases only at the backend boundary. `HeuremaError::category()` maps every variant to one `ErrorCategory` through an exhaustive match with no `_` arm.
+- **Lifecycle vocabulary:** `lifecycle` holds the Phase 02 types (index and operation identity, transitions, the index record) and performs no I/O yet. Identifier newtypes construct only through `TryFrom` (never `From<&str>`) and deserialize through it. Member identity, provenance, and retention are consumer-owned newtypes implementing heurēma's marker traits, which are never blanket-implemented; heurēma defines no provenance or retention shape.
 - **Traits:** `VectorIndex`, `FtsIndex`, `PersistenceBackend` carry the cross-engine contracts. Default methods exist only where the override would be uniform across implementors (e.g., `is_empty`).
 - **Unsupported configurations:** `HnswIndex` (`src/hnsw/engine.rs`) and `Bm25Index` (`src/fts/bm25.rs`) are real engines. `Bm25Index` implements only the argument-less `Simple` tokenizer with no filters; any other analyzer pipeline returns `HeuremaError::NotYetImplemented` before it mutates state.
 - **Persistence adapters:** `AtmisBackend` and `ThesaurosBackend` both wrap each index in a versioned `SnapshotEnvelope` and encode through `serde_json`, never by cloning the live `I` — that byte-level round trip is what proves the encode/decode path a durable backend depends on. Loads go through `decode_snapshot_payload`, which refuses an unsupported format version or the wrong `SnapshotFamily` before the index decoder runs. A snapshot is one index's whole-state save, never a transaction. `PersistenceBackend`'s save methods bound `I: Serialize`, its load methods bound `I: DeserializeOwned` (`persistence.rs`); a caller-chosen index type needs both derives to satisfy an adapter.
@@ -69,7 +73,7 @@ Phases are numbered 00–04. Earlier docs numbered them 1–3: old Phase 1 (API,
 
 - **Phase 00 — producer contract.** Ownership plus ranking, error, removal, durable-state, and `akolouthia` boundary semantics. The retrieval half is fixed by the trait docs and the oracle suite; the durable-state half lands with Phase 02.
 - **Phase 01 — fresh retrieval engines. Complete.** BM25 for the `Simple` pipeline (PR #48), the navigable HNSW graph (PR #50), versioned individual snapshots (PR #51), and an independently written BM25 formula reference that `Bm25Index` must match (`tests/oracle/bm25_formula.rs`). HNSW and BM25 are written fresh here, permanently. `krites` is vendored CozoDB under MPL-2.0 (see `aletheia/crates/krites/NOTICE.md`), so lifting its code would relocate a provenance question rather than resolve one — but that licensing fact is the occasion for write-fresh, not the whole of the ruling. Aletheia's clean-room rewrite of `krites` (phase 05b, gated by `aletheia#5954` / `aletheia#6060` / ADR-007 on phase 05g) shipped in v0.35.0, closing the sequencing gate this entry used to track; the settled answer on the far side of that gate is that `krites` is **replaced, not relocated** — its engines retire by krites' own callers repointing at heurēma once heurēma reaches parity, never by heurēma inheriting krites' code. `krites` serves only as behavioural reference and its tests as a conformance oracle. This entry is the single statement of that; other repo docs point here rather than restate it.
-- **Phase 02 — durable retrieval lifecycle. Next.** A named index gains creation, replace/rebuild, atomic publish, reopen/recovery, deletion, and corruption rules. Writes stage under one operation identity and become visible at one publish point; no index version is visible without its canonical member identities and provenance mapping.
+- **Phase 02 — durable retrieval lifecycle. In progress.** A named index gains creation, replace/rebuild, atomic publish, reopen/recovery, deletion, and corruption rules. Writes stage under one operation identity and become visible at one publish point; no index version is visible without its canonical member identities and provenance mapping.
 - **Phase 03 — `akolouthia`.** The Datalog producer beside the indexes: provenance-bearing fact and rule admission, stratified semi-naive derivation checked against an independent naive evaluator, and facts, derivations, and index membership published together through the Phase 02 lifecycle.
 - **Phase 04 — consumer adapters and retirement.** pinax, mneme, and aletheia bind the producer contracts for their own semantics; each completed migration deletes the superseded `krites` path. No compatibility runtime survives.
 

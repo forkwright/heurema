@@ -18,12 +18,13 @@ layers = [
   "persistence",
   "persistence-adapters",
   "rank-fusion",
+  "lifecycle-vocabulary",
 ]
 
 [[architecture.crates]]
 name = "heurema"
 path = "crates/heurema"
-role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), and the workspace error chain."
+role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary (lifecycle module: identities, operations, transitions, index record; types only, no storage yet), and the workspace error chain with its ErrorCategory classification."
 
 [[architecture.crates]]
 name = "atmis"
@@ -100,3 +101,63 @@ crate = "heurema"
 kind = "type"
 name = "PersistenceSource"
 purpose = "Type-erased adapter for backend-specific persistence errors, kept walkable through std::error::Error::source."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "ErrorCategory"
+purpose = "Class of a HeuremaError (Refused, NotFound, Unsupported, Corrupt, Storage), returned by HeuremaError::category() through an exhaustive match so a consumer can decide retry, report, or repair without matching variants."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "IndexIdentity"
+purpose = "Identity of one named index: an OwnerNamespace plus an IndexName, both validated newtypes (TryFrom only, no '/') so the pair is safe inside storage keys; displays as namespace/name."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "OperationKey"
+purpose = "Caller-supplied idempotency key for one lifecycle operation, validated through TryFrom (ULID and URN shapes fit); unique per IndexIdentity, never reused."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "OperationIdentity"
+purpose = "An OperationKey plus the OperationDigest of the operation's canonical encoding; no public constructor, because the digest is computed from the operation, never supplied."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "IndexVersion"
+purpose = "Non-zero published version of a named index; Create publishes FIRST and each later mutation publishes successor(), which refuses overflow."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "LifecycleOperation"
+purpose = "One requested lifecycle operation (IndexIdentity, OperationKey, IndexChange); new() and Deserialize both require the MemberIdentity, ProvenanceReference, and RetentionReference marker traits."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "IndexChange"
+purpose = "The change an operation requests (Create, Insert, Remove, Rebuild, Destroy); Destroy carries a required retention reference. transition() names its LifecycleTransition."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "LifecycleTransition"
+purpose = "Every step between lifecycle states: the caller-requested Create, Insert, Remove, Rebuild, Destroy, plus the lifecycle's own Publish and Recover."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "IndexRecord"
+purpose = "The named index record's head: identity, IndexConfig (and so family), and IndexState (Active with a version, or Destroyed with last version, retention reference, and destroying operation key). Per-member identity and provenance live in each immutable version payload, not the head."
+
+[[interfaces]]
+crate = "heurema"
+kind = "trait"
+name = "ProvenanceReference"
+purpose = "Marker trait a consumer implements on its own provenance newtype; never blanket-implemented, so () or a bare String cannot stand in. heurema defines no provenance shape. MemberIdentity and RetentionReference follow the same rule."

@@ -14,6 +14,10 @@ updated = "2026-09-25"
 
 [[recent]]
 date = "2026-09-25"
+item = "Phase 02 lifecycle vocabulary landed as types only (heurema::lifecycle): validated IndexIdentity / OperationKey / IndexVersion / OperationDigest newtypes, LifecycleOperation and IndexChange, LifecycleTransition, the IndexRecord head, consumer-implemented MemberIdentity / ProvenanceReference / RetentionReference marker traits, and HeuremaError::category() returning an ErrorCategory. SnapshotFamily is now #[non_exhaustive]. No storage, validation of transitions, or digest computation yet."
+
+[[recent]]
+date = "2026-09-25"
 item = "Independent BM25 formula oracle (tests/oracle/bm25_formula.rs): an f64 reference recomputed from the raw live corpus must match Bm25Index ID for ID within a derived f32 bound on seeded insert/replace/remove workloads; every perturbed reference is caught. The Bm25Index rustdoc now states the scoring contract (k1, b, idf, avgdl, tokenization). Closes Phase 01's last exit item."
 
 [[recent]]
