@@ -3,16 +3,30 @@ name = "heurema"
 repo = "forkwright/heurema"
 generated = false
 source_docs = [
-  "kanon/projects/heurema/STATE.md",
-  "kanon/projects/heurema/ROADMAP.md",
-  "kanon/projects/heurema/vision.md",
   "README.md",
+  "CLAUDE.md",
 ]
 
 [state]
-summary = "Phase 1 ships the public API surface, the real reciprocal-rank-fusion implementation, and typed stubs for HNSW + BM25. Phase 3 ships both PersistenceBackend adapters (atmis, thesauros), unblocked by Phase 2. Consumers can build against the trait shape today; HNSW + BM25 bodies are written fresh in Phase 2, with aletheia's krites serving only as behavioural reference and conformance oracle; persistence is real now."
-current_phase = "Phase 1 API/RRF locked; Phase 3 persistence adapters implemented; Phase 2 HNSW/BM25 written fresh, permanently (krites is reference/oracle only, never a code source)"
-updated = "2026-08-15"
+summary = "Phase 01 is complete: fresh HNSW (an in-memory navigable graph) and BM25 (the Simple pipeline) implement VectorIndex and FtsIndex, the conformance oracle runs every case live, and both persistence adapters (atmis, thesauros) store versioned per-index snapshot envelopes. Reciprocal-rank fusion is implemented. Snapshots are whole-index saves, not transactions; Phase 02 adds the durable retrieval lifecycle, and the akolouthia Datalog engine (Phase 03) is not yet built. krites is behavioural reference and conformance oracle only, never a code source."
+current_phase = "Phase 01 fresh retrieval engines complete (BM25 #48, HNSW #50, versioned snapshots #51); Phase 02 durable retrieval lifecycle next"
+updated = "2026-09-25"
+
+[[recent]]
+date = "2026-09-25"
+item = "Repository docs reconciled with the shipped engines; phases renumbered 00-04 to match the planning roadmap; the docs-drift CI guard now also fails on cited workspace paths that do not exist and on stub-era engine-state wording (scripts/docs-drift.sh)."
+
+[[recent]]
+date = "2026-09-21"
+item = "Versioned individual-snapshot envelopes (PR #51): both adapters refuse unsupported format versions, wrong index families, unversioned bytes, and torn bytes; a populated HNSW index survives thesauros close/reopen with mutation parity."
+
+[[recent]]
+date = "2026-09-21"
+item = "Fresh navigable HNSW graph (PR #50) replaced the placeholder vector type; the oracle runs with no ignored cases and meets the pinned brute-force recall floor."
+
+[[recent]]
+date = "2026-09-21"
+item = "Fresh Simple-pipeline BM25 (PR #48) replaced the placeholder full-text type; other analyzer pipelines return HeuremaError::NotYetImplemented before mutating state."
 
 [[recent]]
 date = "2026-08-15"
@@ -24,14 +38,26 @@ item = "Extracted from kanon/crates/heurema to forkwright/heurema per kanon plan
 
 [[recent]]
 date = "2026-05-04"
-item = "Phase 1 API shape locked: VectorIndex, FtsIndex, PersistenceBackend traits plus real RRF; HNSW + BM25 ship as typed stubs."
+item = "API shape locked (the pre-00 scaffold): VectorIndex, FtsIndex, PersistenceBackend traits plus real RRF; HNSW and BM25 shipped as placeholder types that returned HeuremaError::NotYetImplemented until PRs #48 and #50."
 
 [[recent]]
 date = "2026-04-22"
 item = "Project initiated from fleet storage-tier audit; one HNSW + one BM25 across pinax and mneme cuts the duplicate-failure-surface risk."
 
 [[open_threads]]
-id = "phase-2-implementation"
-title = "Write HNSW and BM25 fresh in heurema"
-blocked_on = "none — aletheia Phase 05g shipped in v0.35.0; krites is behavioural reference and conformance oracle only, not a dependency of this work"
-notes = "Phase 1 is not blocked either — only the stubs depend on this thread. Phase 3 (persistence) also does not depend on this thread; it landed independently."
+id = "phase-02-durable-lifecycle"
+title = "Durable retrieval lifecycle: named indexes, staged writes under one operation identity, one atomic publish point, recovery, and deletion"
+blocked_on = "none"
+notes = "Snapshots stay whole-index saves; the lifecycle is a new producer contract beside PersistenceBackend, not transactionality hidden in an adapter. Pinax and mneme integration waits until its producer tests pass."
+
+[[open_threads]]
+id = "bm25-analyzer-pipelines"
+title = "BM25 tokenizer and filter pipelines beyond Simple"
+blocked_on = "an argument value model for TokenizerConfig::args"
+notes = "Non-Simple pipelines return HeuremaError::NotYetImplemented before mutating state (crates/heurema/src/fts/bm25.rs)."
+
+[[open_threads]]
+id = "akolouthia"
+title = "Phase 03 akolouthia Datalog producer"
+blocked_on = "Phase 02 lifecycle semantics; the canonical provenance type at a stable consumer boundary"
+notes = "Facts, derivations, and index membership publish together through the Phase 02 lifecycle; a separately written naive fixpoint evaluator checks the semi-naive engine."

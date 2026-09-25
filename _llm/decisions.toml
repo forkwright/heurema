@@ -3,13 +3,12 @@ name = "heurema"
 repo = "forkwright/heurema"
 generated = false
 source_docs = [
-  "kanon/projects/kanon/planning/discussion-queue.md",
-  "kanon/projects/heurema/STATE.md",
-  "kanon/projects/heurema/vision.md",
+  "README.md",
+  "CLAUDE.md",
 ]
 
 [decisions]
-summary = "Accepted decisions for heurema. Canonical planning lives in kanon at projects/heurema/ and projects/kanon/planning/discussion-queue.md; this file reflects the load-bearing decisions for agents who land in this repo cold."
+summary = "Load-bearing decisions for heurema, for agents who land in this repo cold. Canonical planning lives in the fleet's private planning repository; superseded decisions stay here with status = \"superseded\" and name their successor."
 
 [[decision]]
 id = "kanon-D-067"
@@ -17,23 +16,23 @@ title = "Tier B EXTRACT-NOW verdict for heurema and epitelesis"
 status = "accepted"
 context = "Operator's 2026-05-28 cross-fleet-need test: heurema has named non-aletheia consumers (pinax, mneme) and the architectural case for one HNSW + one BM25 across the fleet only holds if the primitive is shared, not duplicated."
 decision = "Extract heurema to forkwright/heurema and epitelesis to forkwright/epitelesis. Kanon consumes both as external git deps after extraction."
-consequences = "kanon/crates/heurema is removed in the same wave; planning system at kanon/projects/heurema/ stays in kanon as the canonical source of truth."
+consequences = "kanon/crates/heurema is removed in the same wave; heurema's planning stayed with kanon as the canonical source of truth and later moved to the fleet's private planning repository."
 
 [[decision]]
 id = "heurema-phase-1-locked"
 title = "Phase 1 API shape locked"
 status = "accepted"
-context = "Phase 2 writes HNSW + BM25 fresh (see heurema-license-mpl); the trait shape can land now so consumers compile against it today."
-decision = "heurema exposes VectorIndex, FtsIndex, PersistenceBackend, and RRF as the public substrate. HNSW and FTS concrete types are typed stubs; RRF is implemented now because it has no krites dependency."
-consequences = "Stubs return HeuremaError::NotYetImplemented with a Phase 2 marker so callers see a structured failure rather than a panic during the gap."
+context = "The engines are written fresh (see heurema-phase-2-source-settled); the trait shape can land first so consumers compile against it."
+decision = "heurema exposes VectorIndex, FtsIndex, PersistenceBackend, and RRF as the public substrate. HNSW and FTS concrete types shipped first as placeholder types; RRF was implemented first because it has no krites dependency."
+consequences = "The placeholders returned HeuremaError::NotYetImplemented so callers saw a structured failure rather than a panic during the gap. Superseded in part: Bm25Index (PR #48) and HnswIndex (PR #50) replaced both placeholders, and NotYetImplemented now signals only BM25 analyzer pipelines beyond Simple. The API shape itself stands."
 
 [[decision]]
 id = "heurema-ground-up-rust"
 title = "Ground-up Rust, zero C deps"
 status = "accepted"
 context = "Heurema meets kanon RUST.md standards from day one; the workspace forbids unsafe code."
-decision = "Phase 2 HNSW is written fresh in safe Rust and must reproduce canary-node protection; krites is the conformance oracle, not the source."
-consequences = "No C dependencies, no unsafe blocks. The invariant is carried by a conformance test against krites behaviour, since no code moves; the canary node is silent until the first delete, so only a test catches its loss."
+decision = "HNSW is written fresh in safe Rust and must keep the graph navigable across deletion, the property krites protects with a canary node; krites is the conformance oracle, not the source."
+consequences = "No C dependencies, no unsafe blocks. HnswIndex (PR #50) carries delete-safety with a reciprocal base-layer backbone cycle that degree pruning cannot remove, plus entry-point reselection on removal. Unit tests in crates/heurema/src/hnsw/engine.rs prove it (base_graph_is_reachable_from_the_entry_point, deleting_a_backbone_cycle_vertex_rejoins_its_two_local_neighbours, replacement_and_entry_removal_repair_graph_and_preserve_recall); a lost invariant is silent until the first delete, so only a test catches it."
 
 [[decision]]
 id = "heurema-persistence-pluggable"
@@ -64,7 +63,7 @@ id = "heurema-persistence-serde-bound"
 title = "PersistenceBackend save/load methods bound I on Serialize / DeserializeOwned"
 status = "accepted"
 context = "Phase 1 declared save_vector_index / load_vector_index / save_fts_index / load_fts_index generic over only I: VectorIndex (or I: FtsIndex). Neither VectorIndex nor FtsIndex exposes a constructor: no new, no Default. A generic load_* therefore could not build a value of a caller-chosen I under the original bound, so Ok was structurally unreachable from either load method — the two Phase 1 test fixtures (RecordingBackend, FailingBackend) both proved this obliquely by never once returning Ok. Verified with an isolated rustc probe (not the workspace gate) before writing the adapters: a non_exhaustive struct blocks external struct-literal construction (E0639), while a non_exhaustive enum with public-field variants does not — settling that the two Phase 1 fixtures' literal HeuremaError construction was already valid Rust and that PersistenceBackend's own generic-construction gap was the real blocker, not enum visibility."
-decision = "Bound I: VectorIndex + Serialize on the save methods and I: VectorIndex + DeserializeOwned on the load methods (FtsIndex mirrors both). The bound lives at the persistence boundary only; VectorIndex and FtsIndex themselves are unchanged. HnswConfig, VectorDistance, HnswIndex, FtsConfig, TokenizerConfig, and Bm25Index all gained Serialize + Deserialize derives so the Phase 1 stub types satisfy it."
+decision = "Bound I: VectorIndex + Serialize on the save methods and I: VectorIndex + DeserializeOwned on the load methods (FtsIndex mirrors both). The bound lives at the persistence boundary only; VectorIndex and FtsIndex themselves are unchanged. HnswConfig, VectorDistance, HnswIndex, FtsConfig, TokenizerConfig, and Bm25Index all gained Serialize + Deserialize derives so the placeholder types of the time, and the engines that replaced them, satisfy it."
 consequences = "This is a signature change to a trait heurema's own CLAUDE.md Boundaries section flags ask-first, not an addition beside the Phase 1 signature — a caller-chosen I that does not derive Serialize/Deserialize no longer satisfies PersistenceBackend. No external consumer existed to break: the trait shipped zero implementations before this decision. Both adapters and all persistence_contract.rs fixtures needed their where-clauses updated to match."
 
 [[decision]]
@@ -72,8 +71,8 @@ id = "heurema-fleet-repo-conventions"
 title = "Conform to FLEET-REPO-SETUP.md"
 status = "accepted"
 context = "heurema joins the Tier U public fleet repos and inherits the same release-please, gate-attestation, and root-file conventions as aletheia, kanon, theatron."
-decision = "Ship release-please + gate-attestation workflows, the license recorded in heurema-license-mpl, standards inherited from kanon/crates/basanos/standards/, and the _llm corpus on first commit."
-consequences = "Public-mirror readiness from day one; downstream consumers can pin a git tag and rely on the gate-attestation trailer."
+decision = "Ship release-please + gate-attestation workflows, the license recorded in heurema-license-interop, standards inherited from kanon/crates/basanos/standards/, and the _llm corpus on first commit."
+consequences = "Public-mirror readiness from day one; downstream consumers can pin a git tag and rely on the required GitHub checks, gate-attestation among them; the Gate-Passed trailer itself became advisory fleet-wide."
 
 [[decision]]
 id = "heurema-phase-2-source-settled"
@@ -85,7 +84,24 @@ consequences = "Every surface stating the Phase 2 source points at CLAUDE.md's R
 [[decision]]
 id = "heurema-license-mpl"
 title = "MPL-2.0, not AGPL-3.0-or-later"
-status = "accepted"
+status = "superseded"
+superseded_by = "heurema-license-interop"
 context = "heurema shipped AGPL-3.0-or-later by inheriting the aletheia convention. That silently excluded most of its intended consumers: kanon, logismos and daimon are LicenseRef-PolyForm-Shield-1.0.0 and cannot grant AGPL section 5(c) and 13 terms, so an AGPL heurema could legally serve only aletheia. The same choice also left the krites provenance question open, since the code krites vendored is MPL-2.0 CozoDB."
 decision = "License heurema MPL-2.0. Do not attach Exhibit B, so AGPL stays a Secondary License under section 1.12 and aletheia consumes under section 3.3. Remove AGPL from the deny.toml allow list so no dependency can reintroduce terms the Shield consumers cannot accept."
 consequences = "Every intended consumer can take heurema. File-level copyleft binds modifications to heurema itself without reaching consumer code. Relicensing was clean: the git history carries two identities and one email, both the operator. This also makes the provenance question moot in the direction that matters, since MPL-2.0 is already the correct license for anything CozoDB-derived, while the engines are still written fresh rather than moved."
+
+[[decision]]
+id = "heurema-license-interop"
+title = "Apache-2.0 OR MIT under the fleet interop license posture"
+status = "accepted"
+context = "The fleet declared its license posture once and rendered it per repository (PR #28): fleet, product, interop, and private postures, with one named licensor. heurema is a library other repositories depend on, which is the interop posture's case. PR #28 moved LICENSE and the Cargo.toml license field together in one commit so the manifest and the license text could not disagree."
+decision = "License heurema Apache-2.0 OR MIT, licensor Ardent Works LLC, as rendered by PR #28. This supersedes heurema-license-mpl. The engines stay written fresh, so no inherited copyleft obligation constrains the choice."
+consequences = "Every consumer can take heurema whatever its own license. deny.toml still allows no AGPL dependency, since one would propagate its terms to every consumer. README.md's License section states the same license as LICENSE and Cargo.toml."
+
+[[decision]]
+id = "heurema-phase-numbering"
+title = "Phases numbered 00-04, matching the planning roadmap"
+status = "accepted"
+context = "The repository's own docs numbered phases 1-3 while the planning roadmap numbered them 00-04, so the same label named different work (repo Phase 3 was the persistence adapters; planning Phase 03 is akolouthia)."
+decision = "Public docs, crate metadata, and PR titles use the planning numbering: 00 producer contract, 01 fresh retrieval engines, 02 durable retrieval lifecycle, 03 akolouthia, 04 consumer adapters and retirement. CLAUDE.md's Roadmap maps the old labels once."
+consequences = "Older decisions in this file keep the labels they were written with; CLAUDE.md's Roadmap is where old Phase 1, 2, and 3 translate to the current numbering."

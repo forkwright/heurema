@@ -60,7 +60,7 @@ fn hnsw_exposes_vector_index_contract() -> Result<(), HeuremaError> {
 }
 
 #[test]
-fn hnsw_stub_reports_dimension_mismatch_before_implementation() {
+fn hnsw_insert_reports_dimension_mismatch_from_config_and_input() {
     let mut index = HnswIndex::<u64>::new(HnswConfig::new(3));
 
     let error = match index.insert(7, &[1.0, 2.0]) {

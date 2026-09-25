@@ -1,33 +1,31 @@
 # Parity harness
 
-How Phase 2's HNSW and BM25 implementations are measured against this oracle
-(heurema#29): what "reaches parity" means operationally, and how the suite
-moves from its intended red state to green.
+How heurēma's HNSW and BM25 implementations are measured against this oracle
+(heurema#29): what "reaches parity" means operationally.
 
-## Red state (now)
+## Current state (green since PR #50)
 
-The BM25 oracle cases run live against the fresh Simple-pipeline engine. HNSW cases remain
-`#[ignore = "phase 2: ..."]` while its Phase 1 stub answers `HeuremaError::NotYetImplemented`. Two HNSW tests run live:
+Every BM25 and HNSW oracle case runs live against the fresh engines: BM25 for
+the `Simple` pipeline (PR #48) and the navigable HNSW graph (PR #50). No test in
+this directory is ignored, and the two tripwires that asserted the pre-engine
+placeholders' `NotYetImplemented` answer were deleted in the commits that landed
+the engines, as the green definition below requires.
 
-- `hnsw::dimension_mismatch_is_rejected_before_state_change` — the stub
-  already honours the dimension-check contract, so the harness demonstrably
-  executes against the real trait surface rather than only compiling.
-- `bm25::stub_reports_not_yet_implemented_until_phase_2_lands` and
-  `hnsw::stub_reports_not_yet_implemented_until_phase_2_lands` — tripwires
-  that assert the stub's `NotYetImplemented` and go red the moment a real
-  engine answers.
+`cargo test -p heurema --test oracle` is the parity check.
 
-`cargo test -p heurema --test oracle` runs the BM25 oracle live and leaves only the HNSW cases ignored. `--include-ignored` is reserved for HNSW development until a graph engine replaces that stub.
+HNSW graph-internal invariants are unit-tested beside the engine in
+`src/hnsw/engine.rs`. BM25 formula internals are checked here only through
+trait-observable properties; an independently written formula reference is
+the open item that clause 4 below still asks for on the BM25 side.
 
-## Green definition (Phase 2 exit)
+## Green definition (Phase 01 exit)
 
 An implementation reaches parity when all of the following hold in one
 commit:
 
 1. `cargo test -p heurema --test oracle` passes with zero ignored tests in
-   this directory. Landing the engine and stripping every
-   `#[ignore = "phase 2: ..."]` marker are the same commit; the two tripwires
-   are deleted in it, which their red state forces.
+   this directory. Landing an engine and removing every ignore marker that
+   waited on it were the same commit, and the tripwires were deleted in it.
 2. The property assertions pass unmodified — no weakening an assertion to
    make an implementation pass. An implementation that cannot meet one (for
    example `length_normalization_prefers_the_shorter_document` under a
@@ -46,9 +44,6 @@ commit:
    separate adversarial-cycle tests and the unchanged recall floor as the
    acceptance pair. They are internal work budgets, not a claim that the
    standard HNSW `ef` retained-beam semantics are unchanged.
-
-During Phase 2 development the work-in-progress check is
-`cargo test -p heurema --test oracle -- --include-ignored`.
 
 ## What parity does not mean
 

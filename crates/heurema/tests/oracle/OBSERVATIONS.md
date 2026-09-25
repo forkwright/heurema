@@ -33,11 +33,11 @@ names, and which subsystems were still derived — never copied content.
 Gathered from test and file names on the pinned tree's public test surface.
 "Coverage" below names where each class lands in this repo.
 
-### BM25 / FTS (from `src/fts/indexing.rs`, `tests/public_api_fts_io_misc.rs`)
+### BM25 / FTS (from `krites/src/fts/indexing.rs`, `krites/tests/public_api_fts_io_misc.rs`)
 
 | Class | Coverage |
 |-------|----------|
-| Degenerate inputs score zero (zero tf, zero df, empty corpus) | `bm25::empty_index_query_returns_no_results`, `bm25::no_match_query_returns_no_results` at trait level; the per-component zero cases are formula internals Phase 2 unit-tests in `src/fts/` |
+| Degenerate inputs score zero (zero tf, zero df, empty corpus) | `bm25::empty_index_query_returns_no_results`, `bm25::no_match_query_returns_no_results` at trait level; the per-component zero cases are formula internals with trait-level coverage only; `src/fts/bm25.rs` has no unit test for them yet |
 | Typical input scores nonzero | implicit in every ranking assertion |
 | Length normalization direction: longer document scores lower at equal tf | `bm25::length_normalization_prefers_the_shorter_document` |
 | BM25 differs from plain tf-idf (tf saturation) | `bm25::term_frequency_saturates` |
@@ -45,20 +45,20 @@ Gathered from test and file names on the pinned tree's public test surface.
 | Index lifecycle: put / search / delete | `bm25::len_tracks_inserts`, `bm25::remove_is_idempotent_and_excludes_the_document` |
 | Score-kind variant plumbing | not covered — an engine-API detail with no trait surface |
 | Proximity (`fts_near`) term chaining | not covered — `FtsIndex::query` is a term bag; no proximity surface exists to pin |
-| Tokenizer folding tables and stop words | not covered — the Phase 2 scope is the `Simple` pipeline (`FtsConfig::simple`); the tables there are derived material and would have to be regenerated fresh regardless |
+| Tokenizer folding tables and stop words | not covered — the Phase 01 scope was the `Simple` pipeline (`FtsConfig::simple`); the tables there are derived material and would have to be regenerated fresh regardless |
 
-### HNSW (from `runtime/hnsw*/`, `data/program/search/`, `tests/public_api_queries_and_hnsw.rs`)
+### HNSW (from `krites/runtime/hnsw*/`, `krites/data/program/search/`, `krites/tests/public_api_queries_and_hnsw.rs`)
 
 | Class | Coverage |
 |-------|----------|
 | Distance functions: L2 correctness, cosine on identical vectors | `hnsw::self_query_returns_the_inserted_vector_first_at_zero_distance` |
 | Cosine of a zero vector must not produce NaN | `hnsw::cosine_distance_with_a_zero_vector_stays_finite` |
-| Mismatched query dtype errors | not applicable — the trait is `&[f32]`-only; the dimension-mismatch analogue is `hnsw::dimension_mismatch_is_rejected_before_state_change` (live against the stub) |
+| Mismatched query dtype errors | not applicable — the trait is `&[f32]`-only; the dimension-mismatch analogue is `hnsw::dimension_mismatch_is_rejected_before_state_change` (live against the HNSW engine) |
 | Lifecycle: empty search, insert-and-search, delete, deleted IDs excluded, exact match is top result | `hnsw::empty_index_query_returns_no_results`, `hnsw::len_tracks_inserts`, `hnsw::self_query_...`, `hnsw::remove_is_idempotent_and_excludes_the_id_from_results` |
 | Results ordered by ascending distance, ties stable | `hnsw::query_results_satisfy_the_ranking_contract`, `hnsw::equal_distance_ties_order_by_ascending_id`, `hnsw::smaller_k_is_a_prefix_of_larger_k` |
 | Recall measured against exact top-k | `hnsw::recall_against_brute_force_meets_floor` (0.90 floor on a pinned 256-vector fixture) |
 | Query termination / bounded result sets on a dense fixture | `hnsw::queries_terminate_and_stay_bounded_on_a_dense_fixture` |
-| Random level distribution is non-degenerate | not trait-observable — graph-internal; Phase 2 unit-test territory in `src/hnsw/` |
+| Random level distribution is non-degenerate | not trait-observable — graph-internal; unit-tested in `src/hnsw/engine.rs` (`base_graph_is_reachable_from_the_entry_point` asserts the geometric level distribution) |
 | HNSW result-cache eviction and retention | not covered — an engine-internal choice; the trait exposes no cache |
 | Storage-backed close/reopen preserves recall | not oracle territory — owned by the `PersistenceBackend` contract tests (`persistence_contract.rs`, the adapter test suites) |
 
@@ -68,4 +68,5 @@ Parity is property-level, not bit-exact score equality with krites
 (`tests/oracle/PARITY.md`). Two published-formula choices are implementation
 decisions and stay unpinned: the idf variant for terms appearing in more than
 half the corpus, and the k1/b parameter values. The tokenizer argument value
-model (`TokenizerConfig::args`) is likewise unset until Phase 2.
+model (`TokenizerConfig::args`) is likewise unset; Phase 01 implemented only the
+argument-less `Simple` pipeline.

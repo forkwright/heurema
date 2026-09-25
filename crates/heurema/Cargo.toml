@@ -29,11 +29,12 @@ serde_json = { workspace = true }
 workspace = true
 
 # WHY: maturity flag is read by the kanon substrate registry so consumers can
-# tell at a glance which API surfaces are still pre-stabilization. Phase 1
-# lands the API + RRF; HNSW + FTS bodies are written fresh in Phase 2.
+# tell at a glance which API surfaces are still pre-stabilization. Phase 01
+# landed the fresh HNSW and BM25 engines; Phase 02 adds the durable retrieval
+# lifecycle (phase numbering per CLAUDE.md's Roadmap).
 [package.metadata.kanon]
 maturity = "alpha"
 since = "2026-05-25"
-phase = "1"
-phase-description = "API + RRF + Simple BM25; HNSW stubbed pending a fresh implementation"
-exit-criteria = "Phase 2 HNSW + BM25 written fresh, with aletheia/krites as a behavioural reference and its tests as a conformance oracle; tracked at kanon/projects/heurema/ROADMAP.md"
+phase = "02"
+phase-description = "Phase 01 complete: HNSW graph, Simple-pipeline BM25, RRF, versioned snapshot envelope; Phase 02 durable retrieval lifecycle next"
+exit-criteria = "A named index has creation, replace/rebuild, atomic publish, reopen/recovery, deletion, and corruption rules; no durable mutation exposes an index version without its canonical identities and provenance mapping; adapter tests cover interruption boundaries and an independent model checks observable state after each operation"

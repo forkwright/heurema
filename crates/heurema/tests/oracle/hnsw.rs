@@ -1,8 +1,8 @@
 //! HNSW properties: the paper's graph-search invariants observable through
 //! `VectorIndex`, plus the trait's ranking contract. Graph-internal
 //! invariants the trait cannot observe (entry-point reachability, layer
-//! assignment) are named in `tests/oracle/OBSERVATIONS.md` as Phase 2 unit-
-//! test territory, not oracle territory.
+//! assignment) are unit-tested beside the engine in `src/hnsw/engine.rs`, not
+//! here; `tests/oracle/OBSERVATIONS.md` records the split.
 
 use heurema::{HeuremaError, HnswConfig, HnswIndex, VectorDistance, VectorIndex};
 

@@ -188,9 +188,10 @@ fn save_vector_index_replaces_rather_than_merges() -> Result<(), HeuremaError> {
 /// WHY: a probe [`VectorIndex`] with a JSON shape incompatible with
 /// [`HnswIndex`] — a required field `HnswIndex` never emits — proves
 /// [`HeuremaError::Persistence`] is reachable from a genuine decode failure,
-/// not only from the not-found path. `PersistenceBackend` carries no
-/// type-tag on a saved snapshot, so loading the wrong concrete type under a
-/// shared name is exactly this failure mode, not a hypothetical one.
+/// not only from the not-found path. The snapshot envelope tags only the
+/// format version and index family, not the concrete index type, so loading
+/// the wrong concrete type under a shared name is exactly this failure mode,
+/// not a hypothetical one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProbeVectorIndex {
     marker: String,
