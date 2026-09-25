@@ -26,11 +26,17 @@
 //! applied batches, so an in-process reader also sees each write entirely or
 //! not at all.
 //!
-//! fjall batches have no conditional write, so each lifecycle write takes a
-//! backend-owned lock, checks the stored state (the head, any staging
-//! marker, any operation record), and commits its batch while still holding
-//! the lock. That makes the head comparison a compare-and-set within the
-//! process; fjall's single-process rule covers the rest.
+//! The backend holds two locks:
+//!
+//! - The commit lock covers one write's checks through its commit. fjall
+//!   batches have no conditional write, so each lifecycle write takes it,
+//!   checks the stored state (the head, any staging marker, any payload, any
+//!   operation record), and commits its batch while still holding it. That
+//!   makes the head comparison a compare-and-set within the process; fjall's
+//!   single-process rule covers the rest.
+//! - The shared [`WriterLock`] ([`LifecycleBackend::writer`]) covers a whole
+//!   lifecycle operation, from its head read to its publish, across every
+//!   lifecycle over this backend.
 //!
 //! WARNING: a failed commit poisons the fjall database (fjall's journal
 //! writer marks it poisoned on any journal write or fsync error), and every
@@ -51,7 +57,7 @@ use heurema::{
     DestroyWrite, FtsIndex, HeuremaError, IndexIdentity, IndexVersion, LifecycleBackend,
     OperationKey, PersistenceBackend, PersistenceSource, PublishWrite, QuarantineWrite,
     QuarantinedEntry, SnapshotEnvelope, SnapshotFamily, StageWrite, StagedEntry, VectorIndex,
-    decode_snapshot_payload,
+    WriterLock, decode_snapshot_payload,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -77,7 +83,10 @@ pub struct ThesaurosBackend {
     /// write's checks and its batch could otherwise interleave with another
     /// writer's. Every lifecycle write holds this lock from its first check
     /// through its commit. It guards no data.
-    lifecycle_writer: Mutex<()>,
+    commit_lock: Mutex<()>,
+    /// The writer every lifecycle over this backend shares; see
+    /// [`LifecycleBackend::writer`].
+    writer: WriterLock,
 }
 
 /// The five lifecycle keyspaces.
@@ -93,9 +102,9 @@ struct LifecycleKeyspaces {
     quarantine: fjall::Keyspace,
 }
 
-/// A thread panicked while holding the lifecycle writer lock.
+/// A thread panicked while holding the lifecycle commit lock.
 #[derive(Debug)]
-struct LifecycleWriterPoisoned;
+struct CommitLockPoisoned;
 
 /// The quarantine counter reached `u64::MAX`.
 #[derive(Debug)]
@@ -121,7 +130,9 @@ impl ThesaurosBackend {
     /// WARNING: fjall databases are single-process — opening the same
     /// `path` from two live backends at once is a fleet-wide known hazard
     /// (see kanon's `archeion` crate CLAUDE.md), not specific to this
-    /// adapter. The caller owns process-level exclusivity over `path`.
+    /// adapter. The caller owns process-level exclusivity over `path`. The
+    /// shared lifecycle writer ([`LifecycleBackend::writer`]) covers only
+    /// lifecycles over one backend instance.
     ///
     /// # Errors
     ///
@@ -149,7 +160,8 @@ impl ThesaurosBackend {
             vector_indexes,
             fts_indexes,
             lifecycle,
-            lifecycle_writer: Mutex::new(()),
+            commit_lock: Mutex::new(()),
+            writer: WriterLock::new(),
         })
     }
 
@@ -195,7 +207,7 @@ impl ThesaurosBackend {
             .or_persistence()
     }
 
-    /// The lifecycle writer lock, held from a write's first check through
+    /// The lifecycle commit lock, held from a write's first check through
     /// its commit.
     ///
     /// WHY a poisoned lock is refused: a panic between a write's checks and
@@ -204,10 +216,10 @@ impl ThesaurosBackend {
     /// backend refuses further lifecycle writes rather than guess; reopening
     /// it clears the lock. Reads take no lock and keep working.
     #[track_caller]
-    fn writer(&self) -> Result<MutexGuard<'_, ()>, HeuremaError> {
-        match self.lifecycle_writer.lock() {
+    fn commit_lock(&self) -> Result<MutexGuard<'_, ()>, HeuremaError> {
+        match self.commit_lock.lock() {
             Ok(guard) => Ok(guard),
-            Err(_poisoned) => Err(persistence(LifecycleWriterPoisoned)),
+            Err(_poisoned) => Err(persistence(CommitLockPoisoned)),
         }
     }
 
@@ -302,7 +314,7 @@ impl LifecycleKeyspaces {
         version_key: &str,
     ) -> Result<(), HeuremaError> {
         if Self::contains(snapshot, &self.versions, version_key)? {
-            Err(staged_state_exists(index, version))
+            Err(version_stored(index, version))
         } else {
             Ok(())
         }
@@ -424,6 +436,10 @@ impl PersistenceBackend for ThesaurosBackend {
 }
 
 impl LifecycleBackend for ThesaurosBackend {
+    fn writer(&self) -> &WriterLock {
+        &self.writer
+    }
+
     fn read_head(&self, index: &IndexIdentity) -> Result<Option<Vec<u8>>, HeuremaError> {
         let key = storage_key::head(index);
         LifecycleKeyspaces::get(&self.db.snapshot(), &self.lifecycle.heads, &key)
@@ -460,13 +476,15 @@ impl LifecycleBackend for ThesaurosBackend {
         let prefix = storage_key::index_prefix(write.index);
         let version_key = storage_key::version(write.index, write.version);
         let staging_key = storage_key::staging(write.index, write.version);
+        let operation_key = storage_key::operation(write.index, write.key);
 
-        let _writer = self.writer()?;
+        let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
         let lifecycle = &self.lifecycle;
         lifecycle.check_head(&snapshot, write.index, &head_key, write.expected_head)?;
         lifecycle.refuse_staged(&snapshot, write.index, &prefix)?;
         lifecycle.refuse_stored_version(&snapshot, write.index, write.version, &version_key)?;
+        lifecycle.refuse_recorded(&snapshot, write.index, write.key, &operation_key)?;
         let mut batch = self.lifecycle_batch();
         batch.insert(&lifecycle.versions, version_key, write.payload);
         batch.insert(&lifecycle.staging, staging_key, write.marker);
@@ -479,7 +497,7 @@ impl LifecycleBackend for ThesaurosBackend {
         let staging_key = storage_key::staging(write.index, write.version);
         let operation_key = storage_key::operation(write.index, write.key);
 
-        let _writer = self.writer()?;
+        let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
         let lifecycle = &self.lifecycle;
         lifecycle.check_head(&snapshot, write.index, &head_key, write.expected_head)?;
@@ -504,7 +522,7 @@ impl LifecycleBackend for ThesaurosBackend {
         let prefix = storage_key::index_prefix(write.index);
         let operation_key = storage_key::operation(write.index, write.key);
 
-        let _writer = self.writer()?;
+        let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
         let lifecycle = &self.lifecycle;
         lifecycle.check_head(&snapshot, write.index, &head_key, Some(write.expected_head))?;
@@ -562,7 +580,7 @@ impl LifecycleBackend for ThesaurosBackend {
         let version_key = storage_key::version(write.index, write.version);
         let staging_key = storage_key::staging(write.index, write.version);
 
-        let _writer = self.writer()?;
+        let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
         let lifecycle = &self.lifecycle;
         lifecycle.check_marker(
@@ -666,6 +684,15 @@ fn staged_state_exists(index: &IndexIdentity, version: IndexVersion) -> HeuremaE
 }
 
 #[track_caller]
+fn version_stored(index: &IndexIdentity, version: IndexVersion) -> HeuremaError {
+    HeuremaError::VersionStored {
+        index: index.clone(),
+        version,
+        location: Location::caller(),
+    }
+}
+
+#[track_caller]
 fn staged_state_missing(index: &IndexIdentity, version: IndexVersion) -> HeuremaError {
     HeuremaError::StagedStateMissing {
         index: index.clone(),
@@ -696,16 +723,16 @@ where
     }
 }
 
-impl fmt::Display for LifecycleWriterPoisoned {
+impl fmt::Display for CommitLockPoisoned {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(
-            "thesauros lifecycle writer lock is poisoned: a writer panicked between its checks \
+            "thesauros lifecycle commit lock is poisoned: a writer panicked between its checks \
              and its commit; reopen the backend",
         )
     }
 }
 
-impl std::error::Error for LifecycleWriterPoisoned {}
+impl std::error::Error for CommitLockPoisoned {}
 
 impl fmt::Display for QuarantineSequenceExhausted {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -742,11 +769,13 @@ mod tests {
             IndexName::try_from("notes").expect("name"),
         );
 
+        let key = OperationKey::try_from("op-1").expect("key");
+
         let writer = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    let _writer = backend.lifecycle_writer.lock();
-                    panic!("writer panics while holding the lifecycle writer lock");
+                    let _commit = backend.commit_lock.lock();
+                    panic!("writer panics while holding the lifecycle commit lock");
                 })
                 .join()
         });
@@ -756,6 +785,7 @@ mod tests {
             .stage(StageWrite::new(
                 &index,
                 IndexVersion::FIRST,
+                &key,
                 None,
                 b"marker",
                 b"payload",

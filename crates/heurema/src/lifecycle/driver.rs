@@ -3,7 +3,6 @@
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::apply::{self, Successor};
 use super::backend::{DestroyWrite, LifecycleBackend, PublishWrite, StageWrite};
@@ -17,6 +16,7 @@ use super::operation::{LifecycleOperation, LifecycleTransition};
 use super::published::PublishedIndex;
 use super::record::{IndexRecord, IndexState, IndexStateKind};
 use super::validate::CheckedOperation;
+use super::writer::WriterGuard;
 use crate::error::{
     HeadChangedSnafu, IndexNotFoundSnafu, OperationConflictSnafu, StagedStateExistsSnafu,
     TransitionNotPermittedSnafu,
@@ -30,33 +30,48 @@ use crate::{HeuremaError, OperationConflictDetail};
 /// 1. [`CheckedOperation::check`]: the stateless checks and the operation's
 ///    digest. No backend call is made, so a stateless refusal touches no
 ///    storage.
-/// 2. Replay lookup: the operation record stored under the operation's key
+/// 2. Writer: the backend's [`WriterLock`](crate::WriterLock)
+///    ([`LifecycleBackend::writer`]), held until the operation publishes or
+///    is dropped. A thread that already holds it is refused with
+///    [`HeuremaError::WriterHeld`].
+/// 3. Head read: the head that stage and publish later compare-and-set.
+/// 4. Replay lookup: the operation record stored under the operation's key
 ///    for its index. The same digest returns the recorded outcome as a
 ///    [`PublishReceipt`] with `replayed` set and writes nothing; a different
 ///    digest is [`HeuremaError::OperationConflict`]. The lookup precedes the
 ///    permission check, so a replayed Create still answers after the index
 ///    has moved on.
-/// 3. Head read, then [`CheckedOperation::permit`]: the permission table
-///    and the checks against the current configuration.
-/// 4. Staged-state check: an index holding a staged, unpublished version
+/// 5. Active payload: when the head is Active, the payload of the version
+///    it names, checked against the head's configuration. A payload that is
+///    missing, or that names another configuration, is
+///    [`HeuremaError::CorruptSnapshot`], ahead of any refusal that depends
+///    on the configuration.
+/// 6. [`CheckedOperation::permit`]: the permission table and the checks
+///    against the current configuration.
+/// 7. Staged-state check: an index holding a staged, unpublished version
 ///    refuses every mutation, Create and Destroy included, with
 ///    [`HeuremaError::StagedStateExists`] until recovery clears it.
-/// 5. Build: the successor version is built in memory from the active
+/// 8. Build: the successor version is built in memory from the active
 ///    version's payload (a Rebuild starts from an empty engine), applying
-///    members in ascending identity order. Every engine refusal happens here.
-/// 6. Stage: the version payload and its staging marker, in one durable
+///    members in ascending identity order, and every write is encoded.
+///    Every engine refusal happens here.
+/// 9. Stage: the version payload and its staging marker, in one durable
 ///    write that changes no head (Destroy stages nothing).
-/// 7. Publish: the new head, the operation record, and the removal of the
-///    staging marker, in one atomic durable write. This is the only point at
-///    which the operation becomes visible.
+/// 10. Publish: the new head, the operation record, and the removal of the
+///     staging marker, in one atomic durable write. This is the only point
+///     at which the operation becomes visible.
 ///
-/// Steps 1 to 5 write nothing; a refusal at any of them leaves storage as it
-/// was. Steps 6 and 7 compare-and-set the head read in step 3, so a head
-/// that moved in between (another lifecycle over the same backend) refuses
-/// the write with [`HeuremaError::HeadChanged`] and nothing is written.
+/// Steps 1 to 8 write nothing; a refusal at any of them leaves storage as it
+/// was. Steps 9 and 10 compare-and-set the head read in step 3. Only a
+/// writer that bypasses the backend's writer (or damage) can make them
+/// refuse; they then refuse with [`HeuremaError::HeadChanged`],
+/// [`HeuremaError::StagedStateExists`], [`HeuremaError::VersionStored`],
+/// [`HeuremaError::StagedStateMissing`], or
+/// [`HeuremaError::OperationRecorded`], and the refused write writes
+/// nothing.
 ///
 /// [`apply`](Self::apply) runs every step. [`prepare`](Self::prepare) runs
-/// steps 1 to 5 and returns the remaining two as separate calls
+/// steps 1 to 8 and returns the remaining two as separate calls
 /// ([`Prepared::stage`], [`Staged::publish`]), so a caller can stop between
 /// them.
 ///
@@ -70,18 +85,20 @@ use crate::{HeuremaError, OperationConflictDetail};
 ///
 /// # Concurrency
 ///
-/// A lifecycle runs one mutation at a time: [`prepare`](Self::prepare) takes
-/// a writer lock that the returned [`Prepared`] and [`Staged`] hold until
-/// they publish or are dropped. Reads take no lock.
+/// Every lifecycle over one backend shares that backend's
+/// [`WriterLock`](crate::WriterLock). [`prepare`](Self::prepare) takes it
+/// after the stateless checks, and the returned [`Prepared`] and [`Staged`]
+/// hold it until they publish or are dropped. Another thread's `prepare`
+/// waits for it. A thread that already holds it, from any lifecycle over
+/// the backend, is refused with [`HeuremaError::WriterHeld`] instead of
+/// waiting for itself. Reads take no lock.
 ///
-/// WARNING: a thread that still holds a [`Prepared`] or [`Staged`] must drop
-/// it before it prepares or applies another operation on the same
-/// lifecycle; locking the writer again from that thread does not return
-/// normally (the standard library's mutex deadlocks or panics).
+/// PERF: the writer is held through the build, the encode, and both durable
+/// writes, so mutations on one backend are serialized. Narrowing it needs
+/// recovery to tell a live stage from an orphan.
 #[must_use = "a lifecycle does nothing until an operation is applied"]
 pub struct IndexLifecycle<B, M, P, R> {
     backend: B,
-    writer: Mutex<()>,
     types: ConsumerTypes<M, P, R>,
 }
 
@@ -140,21 +157,21 @@ pub enum Preparation<'a, B, M, P, R> {
 #[must_use = "a prepared operation does nothing until it is staged and published"]
 pub struct Prepared<'a, B, M, P, R> {
     lifecycle: &'a IndexLifecycle<B, M, P, R>,
-    writer: MutexGuard<'a, ()>,
+    writer: WriterGuard<'a>,
     plan: Plan<R>,
     write: PlannedWrite,
 }
 
 /// A staged operation, not yet published.
 ///
-/// Dropping it after a version was staged leaves that version as orphan
-/// staged state: durable, never readable, and refusing every later mutation
-/// of its index with [`HeuremaError::StagedStateExists`] until recovery
-/// clears it.
+/// Dropping it, or a publish that fails or is refused, leaves a version it
+/// staged as orphan staged state: durable, never readable, and refusing
+/// every later mutation of its index with
+/// [`HeuremaError::StagedStateExists`] until recovery clears it.
 #[must_use = "a staged operation is invisible until it is published"]
 pub struct Staged<'a, B, M, P, R> {
     lifecycle: &'a IndexLifecycle<B, M, P, R>,
-    writer: MutexGuard<'a, ()>,
+    writer: WriterGuard<'a>,
     plan: Plan<R>,
     write: StagedWrite,
 }
@@ -213,7 +230,10 @@ where
     /// change. Until then, an index whose operation was interrupted between
     /// stage and publish keeps its orphan staged state, and every mutation
     /// of that index is refused with [`HeuremaError::StagedStateExists`];
-    /// other indexes are unaffected.
+    /// other indexes are unaffected. Recovery takes the backend's writer, so
+    /// it waits for, and never quarantines, another lifecycle's live stage;
+    /// on a thread already holding the writer it is refused with
+    /// [`HeuremaError::WriterHeld`].
     ///
     /// # Errors
     ///
@@ -222,7 +242,6 @@ where
     pub fn open(backend: B) -> Result<Self, HeuremaError> {
         Ok(Self {
             backend,
-            writer: Mutex::new(()),
             types: PhantomData,
         })
     }
@@ -244,23 +263,29 @@ where
         }
     }
 
-    /// Runs steps 1 to 5 of the lifecycle (see [`IndexLifecycle`]): checks,
-    /// replay lookup, permission, staged-state check, and the in-memory
-    /// build, writing nothing.
+    /// Runs steps 1 to 8 of the lifecycle (see [`IndexLifecycle`]): checks,
+    /// the backend's writer, head read, replay lookup, active payload,
+    /// permission, staged-state check, and the in-memory build, writing
+    /// nothing.
     ///
     /// # Errors
     ///
     /// - The stateless refusals of [`CheckedOperation::check`], before any
     ///   backend call.
+    /// - [`HeuremaError::WriterHeld`] when this thread already holds the
+    ///   backend's writer through a [`Prepared`] or [`Staged`] of any
+    ///   lifecycle over the backend.
     /// - [`HeuremaError::OperationConflict`] when the key is recorded for
     ///   the index with a different digest.
+    /// - [`HeuremaError::CorruptSnapshot`] when the head names a version
+    ///   whose payload is missing or names another configuration.
+    /// - [`HeuremaError::HeadChanged`] when a writer that bypasses the
+    ///   backend's writer destroyed the index between the head read and the
+    ///   payload read.
     /// - The refusals of [`CheckedOperation::permit`].
     /// - [`HeuremaError::StagedStateExists`] when the index holds a staged,
     ///   unpublished version.
     /// - The engine's refusals while building the successor version.
-    /// - [`HeuremaError::HeadChanged`] when another lifecycle over the same
-    ///   backend destroyed the index between the head read and the payload
-    ///   read.
     /// - [`HeuremaError::CorruptSnapshot`] or
     ///   [`HeuremaError::UnsupportedSnapshotVersion`] when a stored record
     ///   cannot be read, and [`HeuremaError::Persistence`] when the backend
@@ -270,23 +295,23 @@ where
         operation: LifecycleOperation<M, P, R>,
     ) -> Result<Preparation<'_, B, M, P, R>, HeuremaError> {
         let checked = CheckedOperation::check(operation)?;
-        // INVARIANT: the guard protects no in-memory state (storage is the
-        // state, and every backend write is atomic), so a writer that
-        // panicked leaves nothing half-applied and the poison is ignored.
-        let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        let writer = self.backend.writer().acquire()?;
+        let index = checked.operation().index.clone();
+        // INVARIANT: the head is read before the replay lookup. Every write
+        // that records an operation key changes the head in the same atomic
+        // write, and a head never returns to earlier bytes, so a key recorded
+        // after this read makes the stage or destroy compare-and-set refuse
+        // with `HeadChanged`, having written nothing; a key recorded before it
+        // is found by the lookup. Under the shared writer no other lifecycle
+        // can record one at all; this covers writers that bypass it.
+        let expected_head = self.backend.read_head(&index)?;
         if let Some(receipt) = self.replay(&checked)? {
             return Ok(Preparation::Replayed(receipt));
         }
-        let index = checked.operation().index.clone();
-        let expected_head = self.backend.read_head(&index)?;
         let head = expected_head
             .as_deref()
             .map(|bytes| decode_head::<R>(bytes, &index))
             .transpose()?;
-        let validated = checked.permit(head.as_ref())?;
-        if let Some((version, _)) = self.backend.read_staging(&index)? {
-            return StagedStateExistsSnafu { index, version }.fail();
-        }
         let current = match &head {
             Some(record) => match record.state {
                 IndexState::Active { version } => {
@@ -299,6 +324,10 @@ where
             },
             None => None,
         };
+        let validated = checked.permit(head.as_ref())?;
+        if let Some((version, _)) = self.backend.read_staging(&index)? {
+            return StagedStateExistsSnafu { index, version }.fail();
+        }
         let successor = apply::successor(&validated, current)?;
         let (plan, write) = encode_plan(successor, expected_head, validated.operation())?;
         Ok(Preparation::Ready(Prepared {
@@ -361,7 +390,7 @@ where
         self.backend
     }
 
-    /// Step 2: the recorded outcome when the operation's key is already
+    /// Step 4: the recorded outcome when the operation's key is already
     /// recorded for its index with the same digest.
     fn replay(
         &self,
@@ -396,9 +425,10 @@ where
         }))
     }
 
-    /// The payload of `version`, which `head` names as active, or `None`
-    /// when the payload is gone because the index was destroyed since
-    /// `head` was read.
+    /// Step 5: the payload of `version`, which `head` names as active, or
+    /// `None` when the payload is gone because the index was destroyed since
+    /// `head` was read (only a writer that bypasses the backend's writer can
+    /// do that).
     ///
     /// WHY the second head read: payloads are removed only by destroy, in
     /// the same write that marks the head destroyed. A payload missing under
@@ -429,16 +459,20 @@ where
 }
 
 impl<'a, B: LifecycleBackend, M, P, R> Prepared<'a, B, M, P, R> {
-    /// Step 6: stages the version payload and its marker in one durable
+    /// Step 9: stages the version payload and its marker in one durable
     /// write that changes no head. A Destroy stages nothing; its only write
     /// is [`Staged::publish`].
     ///
     /// # Errors
     ///
-    /// [`HeuremaError::HeadChanged`] when the head moved since it was read,
-    /// [`HeuremaError::StagedStateExists`] when the index gained staged
-    /// state, and [`HeuremaError::Persistence`] when the backend fails; see
-    /// [`LifecycleBackend::stage`].
+    /// Only a writer that bypasses the backend's writer (or damage) makes
+    /// the stage refuse, writing nothing: [`HeuremaError::HeadChanged`] when
+    /// the head moved since it was read, [`HeuremaError::StagedStateExists`]
+    /// when the index gained staged state, [`HeuremaError::VersionStored`]
+    /// when a payload is already stored under the version, and
+    /// [`HeuremaError::OperationRecorded`] when the operation's key was
+    /// recorded meanwhile. [`HeuremaError::Persistence`] when the backend
+    /// fails; see [`LifecycleBackend::stage`].
     pub fn stage(self) -> Result<Staged<'a, B, M, P, R>, HeuremaError> {
         let Self {
             lifecycle,
@@ -456,6 +490,7 @@ impl<'a, B: LifecycleBackend, M, P, R> Prepared<'a, B, M, P, R> {
                 lifecycle.backend.stage(StageWrite::new(
                     &plan.index,
                     version,
+                    &plan.operation.key,
                     expected_head.as_deref(),
                     &marker,
                     &payload,
@@ -502,7 +537,7 @@ impl<'a, B: LifecycleBackend, M, P, R> Prepared<'a, B, M, P, R> {
 }
 
 impl<B: LifecycleBackend, M, P, R> Staged<'_, B, M, P, R> {
-    /// Step 7, the publish point: in one atomic durable write, the new head,
+    /// Step 10, the publish point: in one atomic durable write, the new head,
     /// the operation record, and the removal of the staging marker (for a
     /// Destroy, the destroyed head, the operation record, and the removal of
     /// every version payload). Before it the old version is visible; after
@@ -512,12 +547,20 @@ impl<B: LifecycleBackend, M, P, R> Staged<'_, B, M, P, R> {
     ///
     /// [`HeuremaError::HeadChanged`], [`HeuremaError::StagedStateMissing`],
     /// [`HeuremaError::StagedStateExists`], or
-    /// [`HeuremaError::OperationRecorded`] when another writer changed the
-    /// index since it was read, with nothing written; and
+    /// [`HeuremaError::OperationRecorded`] come only from a writer that
+    /// bypasses the backend's writer. The publish write itself wrote
+    /// nothing, but the version staged at step 9 stays as orphan staged
+    /// state, exactly as if the [`Staged`] had been dropped; a Destroy
+    /// staged nothing.
+    ///
     /// [`HeuremaError::Persistence`] when the backend fails, in which case
-    /// the write may or may not have taken effect. Applying the same
-    /// operation again tells which: a publish that took effect replays at
-    /// the same version.
+    /// the write may or may not have taken effect. Once the backend reads
+    /// its own state, applying the same operation again tells which: a
+    /// publish that took effect replays at the same version, and one that
+    /// did not is refused with [`HeuremaError::StagedStateExists`]. A
+    /// `thesauros` commit failure poisons the database, whose reads may
+    /// miss the write until reopen, so reopen the backend before applying
+    /// again.
     pub fn publish(self) -> Result<PublishReceipt<R>, HeuremaError> {
         let Self {
             lifecycle,

@@ -295,7 +295,12 @@ pub enum HeuremaError {
     /// interrupted operation. Staging over it would destroy that record, and
     /// destroying the index beside it would leave a marker no head can
     /// explain, so every later stage or destroy of the index is refused
-    /// until recovery moves the staged state to quarantine.
+    /// until recovery moves the staged state to quarantine. Every lifecycle
+    /// over a backend shares its writer
+    /// ([`LifecycleBackend::writer`](crate::LifecycleBackend::writer)), so a
+    /// marker that any lifecycle meets under that writer belongs to no
+    /// running operation. Code that writes without the writer can meet
+    /// another writer's live stage here.
     #[snafu(display(
         "index {index} holds interrupted staged state for version {version}; nothing was written"
     ))]
@@ -370,6 +375,39 @@ pub enum HeuremaError {
         index: IndexIdentity,
         /// The operation key already recorded.
         key: OperationKey,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: every lifecycle over one backend shares the backend's writer. A
+    /// thread asking for it again while it holds it would wait for itself
+    /// forever, so the request is refused instead. Publishing or dropping
+    /// the operation in hand releases the writer.
+    #[snafu(display(
+        "this thread already holds the backend's lifecycle writer through a prepared or staged operation it has not published or dropped; nothing was written"
+    ))]
+    WriterHeld {
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: stage never overwrites a stored payload. A lifecycle stages the
+    /// version after the head it compare-and-sets, so a payload already
+    /// under that version with no marker is published by no head and staged
+    /// by no marker. The stored state contradicts itself, and recovery
+    /// (which moves only marked state) cannot clear it. A direct backend
+    /// caller also meets this variant when it stages a version number that
+    /// is already published.
+    #[snafu(display(
+        "index {index} already stores a payload for version {version} that no staging marker names; nothing was written"
+    ))]
+    VersionStored {
+        /// The index the write named.
+        index: IndexIdentity,
+        /// The version whose payload is already stored.
+        version: IndexVersion,
         /// Error creation location.
         #[snafu(implicit)]
         location: snafu::Location,
@@ -454,8 +492,11 @@ pub enum ErrorCategory {
     /// in this category may be valid for a newer build: do not overwrite them.
     Unsupported,
     /// Stored bytes are present but cannot be decoded, violate an engine
-    /// invariant, or belong to another index family. Retrying the read cannot
-    /// succeed; the stored state needs a rebuild.
+    /// invariant, or belong to another index family, or stored lifecycle
+    /// state contradicts itself. Retrying the read cannot succeed. A
+    /// snapshot is saved again from a rebuilt index; a lifecycle record
+    /// (head, payload, or operation record) has no repair path yet, and
+    /// recovery and quarantine arrive in a later Phase 02 change.
     Corrupt,
     /// The persistence backend failed to encode, write, or read bytes; the
     /// error's source chain carries the backend's cause. Whether a retry can
@@ -470,6 +511,8 @@ pub enum ErrorCategory {
     /// The index holds interrupted staged state from an operation that never
     /// published. Staging and destroying that index are refused until
     /// recovery moves the state to quarantine; other indexes are unaffected.
+    /// Every lifecycle over one backend shares the backend's writer, so this
+    /// never names a stage another lifecycle is still running.
     RecoveryRequired,
 }
 
@@ -492,12 +535,15 @@ impl HeuremaError {
             | Self::EmptyBatch { .. }
             | Self::TransitionNotPermitted { .. }
             | Self::RecordMismatch { .. }
-            | Self::UnencodableOperation { .. } => ErrorCategory::Refused,
+            | Self::UnencodableOperation { .. }
+            | Self::WriterHeld { .. } => ErrorCategory::Refused,
             Self::IndexNotFound { .. } => ErrorCategory::NotFound,
             Self::NotYetImplemented { .. } | Self::UnsupportedSnapshotVersion { .. } => {
                 ErrorCategory::Unsupported
             }
-            Self::SnapshotFormat { .. } | Self::CorruptSnapshot { .. } => ErrorCategory::Corrupt,
+            Self::SnapshotFormat { .. }
+            | Self::CorruptSnapshot { .. }
+            | Self::VersionStored { .. } => ErrorCategory::Corrupt,
             Self::Persistence { .. } => ErrorCategory::Storage,
             // NOTE: lifecycle storage refusals.
             Self::HeadChanged { .. }
@@ -598,6 +644,12 @@ mod tests {
                 key: sample_key(),
             }
             .build(),
+            WriterHeldSnafu.build(),
+            VersionStoredSnafu {
+                index: sample_index(),
+                version: IndexVersion::FIRST,
+            }
+            .build(),
         ]
     }
 
@@ -682,6 +734,8 @@ mod tests {
             HeuremaError::OperationRecorded { .. } => {
                 ("OperationRecorded", ErrorCategory::Conflict)
             }
+            HeuremaError::WriterHeld { .. } => ("WriterHeld", ErrorCategory::Refused),
+            HeuremaError::VersionStored { .. } => ("VersionStored", ErrorCategory::Corrupt),
         }
     }
 
@@ -721,6 +775,8 @@ mod tests {
                 "OperationConflict",
                 "StagedStateMissing",
                 "OperationRecorded",
+                "WriterHeld",
+                "VersionStored",
             ]),
             "every variant is sampled"
         );
@@ -744,6 +800,24 @@ mod tests {
         assert_eq!(
             staged.to_string(),
             "index example/notes holds interrupted staged state for version 1; nothing was written"
+        );
+
+        let held = WriterHeldSnafu.build();
+        assert_eq!(
+            held.to_string(),
+            "this thread already holds the backend's lifecycle writer through a prepared or \
+             staged operation it has not published or dropped; nothing was written"
+        );
+
+        let stored = VersionStoredSnafu {
+            index: sample_index(),
+            version: IndexVersion::FIRST,
+        }
+        .build();
+        assert_eq!(
+            stored.to_string(),
+            "index example/notes already stores a payload for version 1 that no staging marker \
+             names; nothing was written"
         );
 
         let conflict = OperationConflictSnafu {

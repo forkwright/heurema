@@ -39,7 +39,7 @@
 //! let version = IndexVersion::FIRST;
 //!
 //! // Values are opaque bytes here; heurēma's lifecycle encodes the real records.
-//! backend.stage(StageWrite::new(&index, version, None, b"marker", b"payload"))?;
+//! backend.stage(StageWrite::new(&index, version, &key, None, b"marker", b"payload"))?;
 //! assert_eq!(backend.read_head(&index)?, None, "staging moves no head");
 //!
 //! backend.publish(PublishWrite::new(
@@ -63,7 +63,7 @@ use heurema::{
     DestroyWrite, FtsIndex, HeuremaError, IndexIdentity, IndexVersion, LifecycleBackend,
     OperationKey, PersistenceBackend, PersistenceSource, PublishWrite, QuarantineWrite,
     QuarantinedEntry, SnapshotEnvelope, SnapshotFamily, StageWrite, StagedEntry, VectorIndex,
-    decode_snapshot_payload,
+    WriterLock, decode_snapshot_payload,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -79,16 +79,20 @@ pub struct AtmisBackend {
     vector_snapshots: RwLock<HashMap<String, Vec<u8>>>,
     fts_snapshots: RwLock<HashMap<String, Vec<u8>>>,
     lifecycle: Mutex<LifecycleState>,
+    /// The writer every lifecycle over this backend shares; see
+    /// [`LifecycleBackend::writer`].
+    writer: WriterLock,
 }
 
 /// Every lifecycle map, behind the one mutex in [`AtmisBackend`].
 ///
 /// WHY one struct under one lock: publish changes the heads, operations,
 /// and staging maps together, and a reader must never see one change
-/// without the others. Keys are [`storage_key`] strings in `BTreeMap`s, so
-/// listings come back in the same byte order fjall's keyspaces give
-/// `thesauros`. Version and operation keys live in separate maps because a
-/// digits-only operation key spells the same text as a version key.
+/// without the others. The four keyed maps use [`storage_key`] strings in
+/// `BTreeMap`s, so listings come back in the same byte order fjall's
+/// keyspaces give `thesauros`; quarantine is a `Vec` in sequence order.
+/// Version and operation keys live in separate maps because a digits-only
+/// operation key spells the same text as a version key.
 #[derive(Debug, Default)]
 struct LifecycleState {
     heads: BTreeMap<String, Vec<u8>>,
@@ -204,7 +208,7 @@ impl LifecycleState {
         version_key: &str,
     ) -> Result<(), HeuremaError> {
         if self.versions.contains_key(version_key) {
-            Err(staged_state_exists(index, version))
+            Err(version_stored(index, version))
         } else {
             Ok(())
         }
@@ -310,6 +314,10 @@ impl PersistenceBackend for AtmisBackend {
 }
 
 impl LifecycleBackend for AtmisBackend {
+    fn writer(&self) -> &WriterLock {
+        &self.writer
+    }
+
     fn read_head(&self, index: &IndexIdentity) -> Result<Option<Vec<u8>>, HeuremaError> {
         let key = storage_key::head(index);
         Ok(self.lifecycle()?.heads.get(&key).cloned())
@@ -354,6 +362,7 @@ impl LifecycleBackend for AtmisBackend {
         let prefix = storage_key::index_prefix(write.index);
         let version_key = storage_key::version(write.index, write.version);
         let staging_key = storage_key::staging(write.index, write.version);
+        let operation_key = storage_key::operation(write.index, write.key);
         let payload = write.payload.to_vec();
         let marker = write.marker.to_vec();
 
@@ -361,6 +370,7 @@ impl LifecycleBackend for AtmisBackend {
         state.check_head(write.index, &head_key, write.expected_head)?;
         state.refuse_staged(write.index, &prefix)?;
         state.refuse_stored_version(write.index, write.version, &version_key)?;
+        state.refuse_recorded(write.index, write.key, &operation_key)?;
         state.versions.insert(version_key, payload);
         state.staging.insert(staging_key, marker);
         Ok(())
@@ -497,6 +507,15 @@ fn staged_state_exists(index: &IndexIdentity, version: IndexVersion) -> HeuremaE
 }
 
 #[track_caller]
+fn version_stored(index: &IndexIdentity, version: IndexVersion) -> HeuremaError {
+    HeuremaError::VersionStored {
+        index: index.clone(),
+        version,
+        location: Location::caller(),
+    }
+}
+
+#[track_caller]
 fn staged_state_missing(index: &IndexIdentity, version: IndexVersion) -> HeuremaError {
     HeuremaError::StagedStateMissing {
         index: index.clone(),
@@ -561,6 +580,7 @@ mod tests {
             .stage(StageWrite::new(
                 &index,
                 IndexVersion::FIRST,
+                &key,
                 None,
                 b"marker",
                 b"payload",
@@ -619,7 +639,7 @@ mod tests {
         let key = OperationKey::try_from("op-1").expect("key");
         backend
             .stage(StageWrite::new(
-                &index, version, None, b"marker", b"payload",
+                &index, version, &key, None, b"marker", b"payload",
             ))
             .expect("stage");
         // WHY: stage writes both halves together, so only a damaged store

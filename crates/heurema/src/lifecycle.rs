@@ -203,6 +203,7 @@ mod operation;
 mod published;
 mod record;
 mod validate;
+mod writer;
 
 pub use backend::{
     DestroyWrite, LIFECYCLE_FORMAT_VERSION, LifecycleBackend, PublishWrite, QuarantineWrite,
@@ -219,6 +220,7 @@ pub use member::{
 pub use operation::{IndexChange, IndexConfig, LifecycleOperation, LifecycleTransition};
 pub use record::{IndexRecord, IndexState, IndexStateKind};
 pub use validate::{CheckedOperation, ValidatedOperation};
+pub use writer::{WriterGuard, WriterLock};
 
 pub use apply::MemberChange;
 pub use driver::{IndexLifecycle, Preparation, Prepared, PublishReceipt, Staged};

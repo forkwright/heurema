@@ -4,14 +4,20 @@
 //! reopen the fjall database.
 //!
 //! WHY one suite for both: the lifecycle driver must behave the same on
-//! either adapter, so each refusal, each atomic write, and each listing
-//! order is pinned once and checked against both. Values here are opaque
-//! byte strings; heurēma's record encodings arrive with the lifecycle
-//! driver, and the backend must not care what the bytes say.
+//! either adapter, so each refusal and each listing order is pinned once and
+//! checked against both. Values here are opaque byte strings on purpose: the
+//! adapter contract is independent of heurēma's record encodings
+//! (`crates/heurema/src/lifecycle/encoding.rs`), which
+//! `lifecycle_conformance.rs` exercises through the driver, and the backend
+//! must not care what the bytes say.
 //!
 //! WHY the durability cases drop the backend before reading: dropping it
 //! closes the only handle on the fjall database, so the reopened backend
-//! reads what reached the journal, as it would after a crash and restart.
+//! reads what reached the journal, as it would after a crash and restart. A
+//! clean drop also persists fjall's journal (`Journal::drop` runs
+//! `SyncAll`), so drop-and-reopen matches a crash only because every
+//! lifecycle write is already `SyncAll`-durable; see the admission in
+//! `lifecycle_conformance.rs` (its "What this cannot prove" paragraph).
 
 use std::cell::Cell;
 use std::fmt;
@@ -24,6 +30,7 @@ use heurema::{
     DestroyWrite, ErrorCategory, HeuremaError, HnswConfig, HnswIndex, IndexIdentity, IndexName,
     IndexVersion, LifecycleBackend, OperationKey, OwnerNamespace, PersistenceBackend,
     PersistenceSource, PublishWrite, QuarantineWrite, QuarantinedEntry, StageWrite, StagedEntry,
+    WriterLock,
 };
 use thesauros::ThesaurosBackend;
 
@@ -55,6 +62,7 @@ conformance!(
     reads_of_absent_keys_return_none,
     stage_then_publish_makes_head_and_operation_visible_and_removes_the_marker,
     stage_never_overwrites_an_existing_version_or_marker,
+    stage_refuses_an_operation_key_already_recorded,
     stage_with_a_stale_expected_head_is_refused_and_changes_nothing,
     publish_with_a_stale_expected_head_is_refused_and_changes_nothing,
     publish_refuses_without_the_matching_staged_marker,
@@ -116,7 +124,8 @@ fn bytes(kind: &str, index: &IndexIdentity, value: u64) -> Vec<u8> {
     format!("{kind} {index} v{value}").into_bytes()
 }
 
-/// Stage version `value` of `index` with [`bytes`] for marker and payload.
+/// Stage version `value` of `index` under [`version_key`], with [`bytes`]
+/// for marker and payload.
 fn stage_version(
     backend: &dyn LifecycleBackend,
     index: &IndexIdentity,
@@ -126,6 +135,7 @@ fn stage_version(
     backend.stage(StageWrite::new(
         index,
         version(value)?,
+        &version_key(value)?,
         expected_head,
         &bytes("marker", index, value),
         &bytes("payload", index, value),
@@ -172,11 +182,12 @@ fn refusal(result: TestResult) -> HeuremaError {
     }
 }
 
-/// The version a staged-state refusal names.
+/// The version a staged-state or stored-version refusal names.
 fn refused_version(error: &HeuremaError) -> Option<u64> {
     match error {
         HeuremaError::StagedStateExists { version, .. }
-        | HeuremaError::StagedStateMissing { version, .. } => Some(version.get()),
+        | HeuremaError::StagedStateMissing { version, .. }
+        | HeuremaError::VersionStored { version, .. } => Some(version.get()),
         _ => None,
     }
 }
@@ -308,10 +319,12 @@ fn stage_never_overwrites_an_existing_version_or_marker(
     stage_version(backend, &notes, 1, None)?;
     let before = observe(backend, &[&notes])?;
 
+    let another = key("another")?;
     for value in [1, 2] {
         let error = refusal(backend.stage(StageWrite::new(
             &notes,
             version(value)?,
+            &another,
             None,
             b"another marker",
             b"another payload",
@@ -330,21 +343,49 @@ fn stage_never_overwrites_an_existing_version_or_marker(
     );
 
     // NOTE: a published version has no marker, only its payload; staging that
-    // version number again must still be refused.
+    // version number again must still be refused, and the payload no marker
+    // names is corrupt stored state, not interrupted state.
     let head = publish_staged(backend, &notes, 1, None)?;
     let before = observe(backend, &[&notes])?;
     let error = refusal(backend.stage(StageWrite::new(
         &notes,
         version(1)?,
+        &another,
         Some(&head),
         b"another marker",
         b"another payload",
     )));
     assert!(
-        matches!(error, HeuremaError::StagedStateExists { .. })
-            && refused_version(&error) == Some(1),
+        matches!(error, HeuremaError::VersionStored { .. }) && refused_version(&error) == Some(1),
         "a stored payload is never overwritten: {error:?}"
     );
+    assert_eq!(error.category(), ErrorCategory::Corrupt);
+    assert_eq!(
+        observe(backend, &[&notes])?,
+        before,
+        "refusal wrote nothing"
+    );
+    Ok(())
+}
+
+fn stage_refuses_an_operation_key_already_recorded(backend: &dyn LifecycleBackend) -> TestResult {
+    let notes = notes()?;
+    let head = publish_version(backend, &notes, 1, None)?;
+    let before = observe(backend, &[&notes])?;
+
+    let error = refusal(backend.stage(StageWrite::new(
+        &notes,
+        version(2)?,
+        &version_key(1)?,
+        Some(&head),
+        &bytes("marker", &notes, 2),
+        &bytes("payload", &notes, 2),
+    )));
+    assert!(
+        matches!(error, HeuremaError::OperationRecorded { ref key, .. } if key.as_str() == "op-1"),
+        "a stage never leaves staged state for a recorded operation: {error:?}"
+    );
+    assert_eq!(error.category(), ErrorCategory::Conflict);
     assert_eq!(
         observe(backend, &[&notes])?,
         before,
@@ -641,6 +682,7 @@ fn quarantine_moves_staged_state_and_never_deletes_it(
     backend.stage(StageWrite::new(
         &notes,
         v1,
+        &key("retry")?,
         None,
         b"retry marker",
         b"retry payload",
@@ -1122,6 +1164,10 @@ impl<B: LifecycleBackend> FaultingBackend<B> {
 }
 
 impl<B: LifecycleBackend> LifecycleBackend for FaultingBackend<B> {
+    fn writer(&self) -> &WriterLock {
+        self.inner.writer()
+    }
+
     fn read_head(&self, index: &IndexIdentity) -> Result<Option<Vec<u8>>, HeuremaError> {
         self.inner.read_head(index)
     }
@@ -1229,8 +1275,34 @@ fn assert_injected(result: TestResult, step: Step, when: When) {
     );
 }
 
+/// Requires the retry of `step`'s write after a fault at `when` to take
+/// effect only if the faulted write did not: before the effect the retry
+/// applies, and after it the retry meets the state the write left and is
+/// refused.
+#[track_caller]
+fn assert_retry(retry: TestResult, step: Step, when: When) {
+    let error = match (retry, when) {
+        (Ok(()), When::BeforeEffect) => return,
+        (Ok(()), When::AfterEffect) => panic!("{step:?} {when:?}: the retry applied twice"),
+        (Err(error), When::BeforeEffect) => panic!("{step:?} {when:?}: {error:?}"),
+        (Err(error), When::AfterEffect) => error,
+    };
+    let expected = match step {
+        Step::Stage => {
+            matches!(error, HeuremaError::StagedStateExists { .. })
+                && refused_version(&error) == Some(2)
+        }
+        Step::Publish | Step::Destroy => matches!(error, HeuremaError::HeadChanged { .. }),
+        Step::Quarantine => {
+            matches!(error, HeuremaError::StagedStateMissing { .. })
+                && refused_version(&error) == Some(2)
+        }
+    };
+    assert!(expected, "{step:?} {when:?}: {error:?}");
+}
+
 #[test]
-fn durable_fault_before_an_effect_leaves_nothing_and_after_leaves_it_durable() -> TestResult {
+fn durable_write_retried_after_a_fault_takes_effect_exactly_once() -> TestResult {
     let notes = notes()?;
     for step in STEPS {
         // NOTE: what the write leaves when it succeeds, after reopen.
@@ -1257,10 +1329,17 @@ fn durable_fault_before_an_effect_leaves_nothing_and_after_leaves_it_durable() -
                 let faulting = FaultingBackend::new(backend, step, when);
                 assert_injected(apply(&faulting, step), step, when);
             } // WHY: the process stops right after the failed call.
+            let reopened = ThesaurosBackend::open(dir.path())?;
             assert_eq!(
-                &observe(&ThesaurosBackend::open(dir.path())?, &[&notes])?,
+                &observe(&reopened, &[&notes])?,
                 expected,
                 "{step:?} {when:?}"
+            );
+            assert_retry(apply(&reopened, step), step, when);
+            assert_eq!(
+                observe(&reopened, &[&notes])?,
+                after,
+                "{step:?} {when:?}: the write took effect exactly once"
             );
         }
     }
@@ -1268,7 +1347,7 @@ fn durable_fault_before_an_effect_leaves_nothing_and_after_leaves_it_durable() -
 }
 
 #[test]
-fn in_memory_fault_before_an_effect_leaves_nothing_and_after_leaves_the_effect() -> TestResult {
+fn in_memory_write_retried_after_a_fault_takes_effect_exactly_once() -> TestResult {
     let notes = notes()?;
     for step in STEPS {
         let reference = AtmisBackend::new();
@@ -1289,6 +1368,12 @@ fn in_memory_fault_before_an_effect_leaves_nothing_and_after_leaves_the_effect()
                 &observe(&backend, &[&notes])?,
                 expected,
                 "{step:?} {when:?}"
+            );
+            assert_retry(apply(&backend, step), step, when);
+            assert_eq!(
+                observe(&backend, &[&notes])?,
+                after,
+                "{step:?} {when:?}: the write took effect exactly once"
             );
         }
     }

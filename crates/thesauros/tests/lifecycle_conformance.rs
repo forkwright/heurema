@@ -21,16 +21,25 @@
 //! - [`Counting`] counts backend reads and writes, which proves a refusal
 //!   happened before any adapter I/O (stateless) or before any write
 //!   (stateful).
+//! - [`Bypassing`] returns its own writer instead of the backend's, the way
+//!   code that bypasses heurēma's shared writer would, and its hooks run
+//!   another lifecycle's operation between two reads of one operation.
 //!
 //! What this cannot prove: a crash in the middle of one fjall batch. That
 //! rests on fjall's journal (one checksummed batch, replayed whole or not at
 //! all), which is relied on and not simulated here; and a regression from
 //! `PersistMode::SyncAll` to fjall's buffered default would pass these tests,
-//! because a clean drop flushes the journal. Both are review items.
+//! because a clean drop flushes the journal. Both are review items. That a
+//! thread blocks while another holds the writer is proven in heurēma's
+//! writer unit tests (`crates/heurema/src/lifecycle/writer.rs`); the
+//! cross-thread cases here check only the order operations take effect in.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, mpsc};
+use std::thread;
 
 use atmis::AtmisBackend;
 use heurema::{
@@ -40,7 +49,7 @@ use heurema::{
     MemberIdentity, OperationKey, OwnerNamespace, PersistenceBackend, PersistenceSource,
     Preparation, Prepared, ProvenanceReference, PublishReceipt, PublishWrite, QuarantineWrite,
     QuarantinedEntry, RetentionReference, StageWrite, Staged, StagedEntry, TokenizerConfig,
-    VectorIndex,
+    VectorIndex, WriterLock,
 };
 use serde::{Deserialize, Serialize};
 use thesauros::ThesaurosBackend;
@@ -101,15 +110,20 @@ conformance!(
     replayed_key_with_different_content_is_refused_across_reopen,
     orphan_staged_state_refuses_the_next_mutation_of_that_index,
     other_indexes_proceed_while_one_holds_staged_state,
-    destroy_is_atomic_across_reopen,
+    destroy_is_one_write_that_survives_reopen,
     staged_version_is_not_readable,
-    two_lifecycles_over_one_backend_cannot_both_publish,
+    a_thread_holding_the_writer_is_refused_on_every_lifecycle_over_the_backend,
+    a_lifecycle_on_another_thread_waits_for_a_live_stage_then_builds_on_it,
+    the_same_key_on_two_threads_publishes_once_and_replays_once,
+    a_same_key_publish_between_the_head_read_and_the_replay_lookup_replays,
+    a_same_key_publish_after_the_replay_lookup_is_refused_with_nothing_written,
+    lifecycles_that_bypass_the_shared_writer_still_never_both_publish,
     lifecycle_and_snapshot_keyspaces_are_independent,
 );
 
 /// Where a case's lifecycle state lives, and how it is closed and reopened.
 trait Store {
-    type Backend: LifecycleBackend + PersistenceBackend;
+    type Backend: LifecycleBackend + PersistenceBackend + Sync;
 
     /// A backend over the store.
     fn open(&self) -> Result<Self::Backend, HeuremaError>;
@@ -213,6 +227,11 @@ impl<B> Counting<B> {
 }
 
 impl<B: LifecycleBackend> LifecycleBackend for Counting<B> {
+    // NOTE: not counted; taking the writer is no read or write of storage.
+    fn writer(&self) -> &WriterLock {
+        self.inner.writer()
+    }
+
     fn read_head(&self, index: &IndexIdentity) -> Result<Option<Vec<u8>>, HeuremaError> {
         self.read().read_head(index)
     }
@@ -332,6 +351,10 @@ impl<B> Faulting<B> {
 }
 
 impl<B: LifecycleBackend> LifecycleBackend for Faulting<B> {
+    fn writer(&self) -> &WriterLock {
+        self.inner.writer()
+    }
+
     fn read_head(&self, index: &IndexIdentity) -> Result<Option<Vec<u8>>, HeuremaError> {
         self.inner.read_head(index)
     }
@@ -369,6 +392,123 @@ impl<B: LifecycleBackend> LifecycleBackend for Faulting<B> {
 
     fn destroy(&self, write: DestroyWrite<'_>) -> Result<(), HeuremaError> {
         self.write(Step::Destroy, |inner| inner.destroy(write))
+    }
+
+    fn list_heads(&self) -> Result<Vec<(IndexIdentity, Vec<u8>)>, HeuremaError> {
+        self.inner.list_heads()
+    }
+
+    fn list_staged(&self) -> Result<Vec<StagedEntry>, HeuremaError> {
+        self.inner.list_staged()
+    }
+
+    fn list_operations(
+        &self,
+        index: &IndexIdentity,
+    ) -> Result<Vec<(OperationKey, Vec<u8>)>, HeuremaError> {
+        self.inner.list_operations(index)
+    }
+
+    fn quarantine(&self, write: QuarantineWrite<'_>) -> Result<(), HeuremaError> {
+        self.inner.quarantine(write)
+    }
+
+    fn list_quarantined(&self) -> Result<Vec<QuarantinedEntry>, HeuremaError> {
+        self.inner.list_quarantined()
+    }
+}
+
+/// Where a [`Bypassing`] hook runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hook {
+    /// Once `read_head` has read the head, before it returns.
+    AfterReadHead,
+    /// Once `read_operation` has read the record, before it returns.
+    AfterReadOperation,
+}
+
+/// Forwards every call to `inner` except [`LifecycleBackend::writer`], which
+/// returns this wrapper's own [`WriterLock`]: it models code that bypasses
+/// heurēma's shared writer, so a lifecycle over `inner` can write in the
+/// middle of an operation run through this one. An armed hook runs once, at
+/// its [`Hook`] point, after the inner read's result is computed.
+struct Bypassing<'h, B> {
+    inner: B,
+    writer: WriterLock,
+    hook: RefCell<Option<Armed<'h>>>,
+}
+
+/// A hook and the point it runs at.
+type Armed<'h> = (Hook, Box<dyn FnOnce() + 'h>);
+
+impl<'h, B> Bypassing<'h, B> {
+    const fn new(inner: B) -> Self {
+        Self {
+            inner,
+            writer: WriterLock::new(),
+            hook: RefCell::new(None),
+        }
+    }
+
+    /// Runs `run` once, the next time the wrapper reaches `when`.
+    fn arm(&self, when: Hook, run: impl FnOnce() + 'h) {
+        *self.hook.borrow_mut() = Some((when, Box::new(run)));
+    }
+
+    fn fire(&self, when: Hook) {
+        let armed = self.hook.borrow_mut().take_if(|(armed, _)| *armed == when);
+        if let Some((_, run)) = armed {
+            run();
+        }
+    }
+}
+
+impl<B: LifecycleBackend> LifecycleBackend for Bypassing<'_, B> {
+    fn writer(&self) -> &WriterLock {
+        &self.writer
+    }
+
+    fn read_head(&self, index: &IndexIdentity) -> Result<Option<Vec<u8>>, HeuremaError> {
+        let head = self.inner.read_head(index);
+        self.fire(Hook::AfterReadHead);
+        head
+    }
+
+    fn read_version(
+        &self,
+        index: &IndexIdentity,
+        version: IndexVersion,
+    ) -> Result<Option<Vec<u8>>, HeuremaError> {
+        self.inner.read_version(index, version)
+    }
+
+    fn read_operation(
+        &self,
+        index: &IndexIdentity,
+        key: &OperationKey,
+    ) -> Result<Option<Vec<u8>>, HeuremaError> {
+        let record = self.inner.read_operation(index, key);
+        self.fire(Hook::AfterReadOperation);
+        record
+    }
+
+    fn read_staging(
+        &self,
+        index: &IndexIdentity,
+    ) -> Result<Option<(IndexVersion, Vec<u8>)>, HeuremaError> {
+        self.inner.read_staging(index)
+    }
+
+    fn stage(&self, write: StageWrite<'_>) -> Result<(), HeuremaError> {
+        self.inner.stage(write)
+    }
+
+    fn publish(&self, write: PublishWrite<'_>) -> Result<(), HeuremaError> {
+        self.inner.publish(write)
+    }
+
+    fn destroy(&self, write: DestroyWrite<'_>) -> Result<(), HeuremaError> {
+        self.inner.destroy(write)
     }
 
     fn list_heads(&self) -> Result<Vec<(IndexIdentity, Vec<u8>)>, HeuremaError> {
@@ -1466,7 +1606,7 @@ fn other_indexes_proceed_while_one_holds_staged_state<S: Store>(store: &S) -> Te
     Ok(())
 }
 
-fn destroy_is_atomic_across_reopen<S: Store>(store: &S) -> TestResult {
+fn destroy_is_one_write_that_survives_reopen<S: Store>(store: &S) -> TestResult {
     let lifecycle = open_faulting(store)?;
     let notes = index("notes")?;
     seeded(&lifecycle, &notes)?;
@@ -1609,10 +1749,330 @@ fn staged_version_is_not_readable<S: Store>(store: &S) -> TestResult {
     assert_reads_version_two(&lifecycle, &other)
 }
 
-fn two_lifecycles_over_one_backend_cannot_both_publish<S: Store>(store: &S) -> TestResult {
+/// Requires `result` to be refused because this thread already holds the
+/// backend's writer.
+#[track_caller]
+fn assert_writer_held<T: fmt::Debug>(result: Result<T, HeuremaError>) {
+    let error = refused(result);
+    assert!(
+        matches!(error, HeuremaError::WriterHeld { .. }),
+        "unexpected {error:?}"
+    );
+    assert_eq!(error.category(), ErrorCategory::Refused, "{error}");
+}
+
+/// Requires every mutation through `first` or `second`, on any index, to be
+/// refused with `WriterHeld` while this thread holds the backend's writer,
+/// except one that its stateless checks refuse first.
+fn assert_held_by_this_thread<A: LifecycleBackend, B: LifecycleBackend>(
+    first: &Lifecycle<A>,
+    second: &Lifecycle<B>,
+    notes: &IndexIdentity,
+) -> TestResult {
+    let point = || vec![vector(9, 9, &[0.0, 0.0])];
+    // WHY `second` first: a writer that belonged to each lifecycle instead of
+    // the backend would let `second` through here, while `first` would wait
+    // for itself.
+    assert_writer_held(second.prepare(insert(notes, "k", point())?));
+    assert_writer_held(second.apply(create_vector(&index("other")?, "create", 2)?));
+    match refused(second.apply(insert(notes, "k", vec![])?)) {
+        HeuremaError::EmptyBatch { .. } => {}
+        other => panic!("stateless checks precede the writer: {other:?}"),
+    }
+    assert_writer_held(first.prepare(insert(notes, "k", point())?));
+    assert_writer_held(first.apply(insert(notes, "k", point())?));
+    assert_eq!(head_state(first, notes)?, Some((IndexStateKind::Active, 2)));
+    Ok(())
+}
+
+fn a_thread_holding_the_writer_is_refused_on_every_lifecycle_over_the_backend<S: Store>(
+    store: &S,
+) -> TestResult {
+    let shared = Arc::new(store.open()?);
+    let first = Lifecycle::open(Arc::clone(&shared))?;
+    let second = Lifecycle::open(&*shared)?;
+    let notes = index("notes")?;
+    seeded(&first, &notes)?;
+    let member = || insert(&notes, "a", vec![vector(3, 30, &[1.0, 1.0])]);
+
+    let prepared = ready(first.prepare(member()?)?);
+    assert_held_by_this_thread(&first, &second, &notes)?;
+    assert_eq!(staged_version(&first, &notes)?, None);
+    drop(prepared);
+
+    let staged = stage(&first, member()?)?;
+    assert_held_by_this_thread(&first, &second, &notes)?;
+    assert_eq!(staged_version(&first, &notes)?, Some(3));
+    assert_receipt(&staged.publish()?, 3, false);
+    assert_receipt(
+        &second.apply(insert(&notes, "b", vec![vector(4, 40, &[0.0, 1.0])])?)?,
+        4,
+        false,
+    );
+    Ok(())
+}
+
+/// Unwraps a scoped thread's result, re-raising its panic.
+fn joined<T>(result: thread::Result<T>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+fn a_lifecycle_on_another_thread_waits_for_a_live_stage_then_builds_on_it<S: Store>(
+    store: &S,
+) -> TestResult {
     let backend = store.open()?;
     let first = Lifecycle::open(&backend)?;
-    let second = Lifecycle::open(&backend)?;
+    let notes = index("notes")?;
+    seeded(&first, &notes)?;
+    let staged = stage(
+        &first,
+        insert(&notes, "a", vec![vector(3, 30, &[1.0, 1.0])])?,
+    )?;
+    let publishing = AtomicBool::new(false);
+    let (started, waiter_started) = mpsc::channel();
+
+    let (published, waited) = thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            let second = Lifecycle::open(&backend)?;
+            let operation = insert(&notes, "b", vec![vector(4, 40, &[0.0, 1.0])])?;
+            assert!(
+                started.send(()).is_ok(),
+                "the main thread stopped listening"
+            );
+            let applied = second.apply(operation);
+            Ok::<_, HeuremaError>((applied, publishing.load(Ordering::SeqCst)))
+        });
+        assert!(
+            waiter_started.recv().is_ok(),
+            "the other thread stopped before it applied"
+        );
+        // WHY: set before the publish, so a result the other thread returns
+        // before the publish began would carry `false`.
+        publishing.store(true, Ordering::SeqCst);
+        let published = staged.publish();
+        (published, joined(waiter.join()))
+    });
+
+    assert_receipt(&published?, 3, false);
+    let (applied, saw_publishing) = waited?;
+    assert_receipt(&applied?, 4, false);
+    assert!(
+        saw_publishing,
+        "the other thread's operation returned only after the live stage published"
+    );
+    let (active, members) = observe(&first, &notes)?;
+    assert_eq!(active, 4);
+    let ids: Vec<u64> = members.iter().map(|(id, _, _)| *id).collect();
+    assert_eq!(ids, [1, 2, 3, 4], "it built on the published version");
+    Ok(())
+}
+
+fn the_same_key_on_two_threads_publishes_once_and_replays_once<S: Store>(store: &S) -> TestResult {
+    // WHY a smoke test: whichever thread takes the writer first publishes,
+    // and the other replays. Only a scheduling that splits the head read and
+    // the replay lookup could break it, which the hook cases below force.
+    let backend = store.open()?;
+    let notes = index("notes")?;
+    seeded(&Lifecycle::open(&backend)?, &notes)?;
+    let barrier = Barrier::new(2);
+    let (backend, notes, barrier) = (&backend, &notes, &barrier);
+
+    let receipts = thread::scope(|scope| {
+        let racers: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(move || {
+                    let lifecycle = Lifecycle::open(backend)?;
+                    let operation = insert(notes, "same", vec![vector(3, 30, &[1.0, 1.0])])?;
+                    barrier.wait();
+                    lifecycle.apply(operation)
+                })
+            })
+            .collect();
+        racers
+            .into_iter()
+            .map(|racer| joined(racer.join()))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+
+    let mut replayed: Vec<bool> = receipts.iter().map(|receipt| receipt.replayed).collect();
+    replayed.sort_unstable();
+    assert_eq!(replayed, [false, true], "one publishes, the other replays");
+    for receipt in &receipts {
+        assert_eq!(receipt.version().get(), 3, "{receipt:?}");
+    }
+    assert_eq!(receipts[0].operation, receipts[1].operation);
+    assert_eq!(backend.read_staging(notes)?, None);
+    Ok(())
+}
+
+/// One same-key race: another lifecycle publishes `published` inside a
+/// hook, while the racer applies `racing` under the same key.
+struct SameKeyRace {
+    label: &'static str,
+    index: IndexIdentity,
+    /// Whether the index starts as [`seeded`]; otherwise it is absent.
+    seeded: bool,
+    published: Operation,
+    racing: Operation,
+    /// Whether `racing` has `published`'s digest.
+    same_digest: bool,
+}
+
+fn same_key_races() -> Result<Vec<SameKeyRace>, HeuremaError> {
+    let point = |provenance| vec![vector(3, provenance, &[1.0, 1.0])];
+    let [same, other, created, destroyed] =
+        ["insert-same", "insert-other", "create", "destroy"].map(index);
+    let (same, other, created, destroyed) = (same?, other?, created?, destroyed?);
+    Ok(vec![
+        SameKeyRace {
+            label: "insert, same digest",
+            published: insert(&same, "k", point(30))?,
+            racing: insert(&same, "k", point(30))?,
+            index: same,
+            seeded: true,
+            same_digest: true,
+        },
+        SameKeyRace {
+            label: "insert, another digest",
+            published: insert(&other, "k", point(30))?,
+            racing: insert(&other, "k", point(31))?,
+            index: other,
+            seeded: true,
+            same_digest: false,
+        },
+        SameKeyRace {
+            label: "create on an absent index",
+            published: create_vector(&created, "k", 2)?,
+            racing: create_vector(&created, "k", 2)?,
+            index: created,
+            seeded: false,
+            same_digest: true,
+        },
+        SameKeyRace {
+            label: "destroy",
+            published: destroy(&destroyed, "k", 1)?,
+            racing: destroy(&destroyed, "k", 1)?,
+            index: destroyed,
+            seeded: true,
+            same_digest: true,
+        },
+    ])
+}
+
+/// What a same-key race left: the racer's result, its retry's result, and
+/// the other lifecycle's receipt.
+struct RaceOutcome {
+    raced: Result<PublishReceipt<PlaceholderRetention>, HeuremaError>,
+    retried: Result<PublishReceipt<PlaceholderRetention>, HeuremaError>,
+    published: PublishReceipt<PlaceholderRetention>,
+}
+
+/// Runs `race`: a lifecycle over `backend` publishes at `when` inside the
+/// racer's operation, and the racer, which bypasses the shared writer,
+/// then retries. Requires that neither attempt left staged state and that
+/// the head stays the other lifecycle's publish.
+fn run_same_key_race<B: LifecycleBackend>(
+    backend: &B,
+    race: &SameKeyRace,
+    when: Hook,
+) -> Result<RaceOutcome, HeuremaError> {
+    let other = Lifecycle::open(backend)?;
+    if race.seeded {
+        seeded(&other, &race.index)?;
+    }
+    let published = RefCell::new(None);
+    let racer = Lifecycle::open(Bypassing::new(backend))?;
+    racer
+        .backend()
+        .arm(when, || match other.apply(race.published.clone()) {
+            Ok(receipt) => *published.borrow_mut() = Some(receipt),
+            Err(error) => panic!("{}: the other lifecycle's publish: {error:?}", race.label),
+        });
+    let raced = racer.apply(race.racing.clone());
+    let Some(published) = published.borrow_mut().take() else {
+        panic!("{}: the hook never ran", race.label);
+    };
+    let assert_untouched = |attempt: &str| -> TestResult {
+        assert_eq!(
+            backend.read_staging(&race.index)?,
+            None,
+            "{}: the {attempt} left staged state",
+            race.label
+        );
+        assert_eq!(
+            other.record(&race.index)?.map(|record| record.state),
+            Some(published.state.clone()),
+            "{}: the head is the other lifecycle's publish after the {attempt}",
+            race.label
+        );
+        Ok(())
+    };
+    assert_untouched("race")?;
+    let retried = racer.apply(race.racing.clone());
+    assert_untouched("retry")?;
+    Ok(RaceOutcome {
+        raced,
+        retried,
+        published,
+    })
+}
+
+/// Requires the racer's answer to be the key's recorded outcome: a replay of
+/// the other lifecycle's publish for the same digest, a conflict for
+/// another.
+#[track_caller]
+fn assert_recorded_answer(
+    race: &SameKeyRace,
+    published: &PublishReceipt<PlaceholderRetention>,
+    answer: Result<PublishReceipt<PlaceholderRetention>, HeuremaError>,
+) {
+    match answer {
+        Ok(receipt) if race.same_digest => {
+            assert!(receipt.replayed, "{}: {receipt:?}", race.label);
+            assert_eq!(receipt.operation, published.operation, "{}", race.label);
+            assert_eq!(receipt.state, published.state, "{}", race.label);
+        }
+        Err(HeuremaError::OperationConflict { .. }) if !race.same_digest => {}
+        other => panic!("{}: unexpected {other:?}", race.label),
+    }
+}
+
+fn a_same_key_publish_between_the_head_read_and_the_replay_lookup_replays<S: Store>(
+    store: &S,
+) -> TestResult {
+    let backend = store.open()?;
+    for race in same_key_races()? {
+        let outcome = run_same_key_race(&backend, &race, Hook::AfterReadHead)?;
+        assert_recorded_answer(&race, &outcome.published, outcome.raced);
+        assert_recorded_answer(&race, &outcome.published, outcome.retried);
+    }
+    Ok(())
+}
+
+fn a_same_key_publish_after_the_replay_lookup_is_refused_with_nothing_written<S: Store>(
+    store: &S,
+) -> TestResult {
+    let backend = store.open()?;
+    for race in same_key_races()? {
+        let outcome = run_same_key_race(&backend, &race, Hook::AfterReadOperation)?;
+        match outcome.raced {
+            Err(HeuremaError::HeadChanged { .. }) => {}
+            other => panic!("{}: unexpected {other:?}", race.label),
+        }
+        assert_recorded_answer(&race, &outcome.published, outcome.retried);
+    }
+    Ok(())
+}
+
+fn lifecycles_that_bypass_the_shared_writer_still_never_both_publish<S: Store>(
+    store: &S,
+) -> TestResult {
+    let backend = store.open()?;
+    let first = Lifecycle::open(&backend)?;
+    let second = Lifecycle::open(Bypassing::new(&backend))?;
     let notes = index("notes")?;
     seeded(&first, &notes)?;
     let member = |id: u64| vec![vector(id, 1, &[0.25 * id as f32, 0.0])];
@@ -1621,7 +2081,14 @@ fn two_lifecycles_over_one_backend_cannot_both_publish<S: Store>(store: &S) -> T
     let a = ready(first.prepare(insert(&notes, "a", member(3))?)?);
     let b = ready(second.prepare(insert(&notes, "b", member(4))?)?);
     let a = a.stage()?;
-    assert_staged_state(&refused(b.stage()), 3);
+    // NOTE: no category is asserted. `StagedStateExists` means interrupted
+    // state only to writers that hold the shared writer, and `second`
+    // bypasses it.
+    let error = refused(b.stage());
+    assert!(
+        matches!(error, HeuremaError::StagedStateExists { version, .. } if version.get() == 3),
+        "unexpected {error:?}"
+    );
     assert_receipt(&a.publish()?, 3, false);
 
     // NOTE: Both prepare from version 3; the first publishes, and the second's

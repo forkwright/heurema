@@ -44,7 +44,7 @@ pub use lifecycle::{
 };
 pub use lifecycle::{
     DestroyWrite, LIFECYCLE_FORMAT_VERSION, LifecycleBackend, PublishWrite, QuarantineWrite,
-    QuarantinedEntry, StageWrite, StagedEntry,
+    QuarantinedEntry, StageWrite, StagedEntry, WriterGuard, WriterLock,
 };
 pub use lifecycle::{
     IndexHit, IndexLifecycle, MemberChange, MemberEntry, Preparation, Prepared, PublishReceipt,

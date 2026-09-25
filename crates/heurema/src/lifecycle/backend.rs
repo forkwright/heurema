@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use super::identity::{IndexIdentity, IndexVersion, OperationKey};
+use super::writer::WriterLock;
 use crate::HeuremaError;
 
 /// The format version heurēma writes into every lifecycle record it stores
@@ -38,7 +39,7 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 /// (compare-and-set), never overwriting a stored value, and refusing while
 /// staged state exists.
 ///
-/// An adapter keeps five maps, each a fixed fjall keyspace in `thesauros`:
+/// A keyed store (the fjall keyspaces of `thesauros`) keeps five maps:
 ///
 /// | map | key | value |
 /// |---|---|---|
@@ -48,8 +49,13 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 /// | operations | [`storage_key::operation`] | the record of one published operation |
 /// | quarantine | [`storage_key::quarantine`] | a staged marker and payload moved aside |
 ///
+/// `thesauros` keys the quarantine map by [`storage_key::quarantine`];
+/// `atmis` keeps quarantine entries in a `Vec` in sequence order.
+///
 /// # Contract
 ///
+/// - Every lifecycle over one backend shares its writer (see
+///   [`writer`](LifecycleBackend::writer)).
 /// - Each write ([`stage`](LifecycleBackend::stage),
 ///   [`publish`](LifecycleBackend::publish),
 ///   [`destroy`](LifecycleBackend::destroy),
@@ -57,18 +63,21 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 ///   before it returns `Ok`: a reader, in process or after a crash and
 ///   reopen, sees all of the write or none of it. (`atmis` keeps nothing past
 ///   the process; within it the same holds.)
+/// - A read sees every write that returned before the read began, and each
+///   write entirely or not at all.
 /// - Each write runs its checks and its effect under one backend-owned lock,
 ///   so no other write lands between them. That makes an expected head or
-///   marker a compare-and-set even when several lifecycles share one
-///   backend.
+///   marker a compare-and-set, and it holds even for writers that do not
+///   hold the backend's writer.
 /// - A write refused with [`HeuremaError::HeadChanged`],
-///   [`HeuremaError::StagedStateExists`],
+///   [`HeuremaError::StagedStateExists`], [`HeuremaError::VersionStored`],
 ///   [`HeuremaError::StagedStateMissing`], or
 ///   [`HeuremaError::OperationRecorded`] wrote nothing.
 /// - A write that fails with [`HeuremaError::Persistence`] may or may not
 ///   have taken effect (a lost acknowledgement): read the state back before
 ///   deciding what to do. After a failed `thesauros` commit the fjall
-///   database refuses further writes until the backend is reopened.
+///   database refuses further writes until the backend is reopened, and
+///   until then its reads may also miss a write that reached the journal.
 ///
 /// # Atomicity basis
 ///
@@ -90,7 +99,9 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 /// recovery clears it, by moving it to quarantine through
 /// [`quarantine`](LifecycleBackend::quarantine); nothing ever deletes it.
 /// Recovery arrives with the lifecycle driver's reopen path in a later
-/// Phase 02 change; until then an orphan blocks its index.
+/// Phase 02 change; until then an orphan blocks its index. With every writer
+/// holding the backend's [`writer`](LifecycleBackend::writer), a marker
+/// exists outside any operation only when that operation was interrupted.
 ///
 /// The methods after [`destroy`](LifecycleBackend::destroy) serve recovery
 /// and audit. They are declared together with the rest so a later recovery
@@ -107,6 +118,28 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 /// `Box<dyn LifecycleBackend>`, and `Arc<dyn LifecycleBackend>` all
 /// implement it.
 pub trait LifecycleBackend {
+    /// The writer every lifecycle over this backend shares.
+    ///
+    /// [`IndexLifecycle`](crate::IndexLifecycle) takes it after an
+    /// operation's stateless checks, and [`Prepared`](crate::Prepared) and
+    /// [`Staged`](crate::Staged) hold it until publish or drop. So on one
+    /// backend at most one operation is between its head read and its
+    /// publish at a time, whichever lifecycle or thread runs it, and any
+    /// staging marker met under the writer is interrupted state.
+    ///
+    /// An adapter owns exactly one [`WriterLock`] and returns it on every
+    /// call. A wrapper returns the lock of the backend it wraps; the pointer
+    /// impls do.
+    ///
+    /// Direct callers of [`stage`](Self::stage), [`publish`](Self::publish),
+    /// [`destroy`](Self::destroy), or [`quarantine`](Self::quarantine) should
+    /// hold it. Without it the structural checks still hold, but a
+    /// [`HeuremaError::StagedStateExists`] the caller causes or meets may
+    /// name a live stage, and a `quarantine` it runs may move a live stage,
+    /// whose publish then fails with [`HeuremaError::StagedStateMissing`],
+    /// having published nothing.
+    fn writer(&self) -> &WriterLock;
+
     /// The head record of `index`, or `None` when the index has no head.
     ///
     /// # Errors
@@ -169,13 +202,16 @@ pub trait LifecycleBackend {
     /// 2. No staging marker exists for the index, at any version.
     /// 3. No payload is stored under `write.version`: stage never
     ///    overwrites.
+    /// 4. No operation record exists under `write.key`: stage never leaves
+    ///    staged state for an operation that is already recorded.
     ///
     /// # Errors
     ///
-    /// [`HeuremaError::HeadChanged`] when check 1 fails, and
-    /// [`HeuremaError::StagedStateExists`] when check 2 or 3 fails, naming
-    /// the version found. Otherwise see the
-    /// [trait-level errors](LifecycleBackend#errors).
+    /// [`HeuremaError::HeadChanged`] when check 1 fails,
+    /// [`HeuremaError::StagedStateExists`] when check 2 fails, naming the
+    /// version found, [`HeuremaError::VersionStored`] when check 3 fails,
+    /// and [`HeuremaError::OperationRecorded`] when check 4 fails. Otherwise
+    /// see the [trait-level errors](LifecycleBackend#errors).
     fn stage(&self, write: StageWrite<'_>) -> Result<(), HeuremaError>;
 
     /// Publish a staged version: in one atomic write that is durable before
@@ -273,12 +309,16 @@ pub trait LifecycleBackend {
 /// Implements [`LifecycleBackend`] for a pointer type by forwarding every
 /// method to the pointee.
 ///
-/// WHY: a lifecycle may own its backend, borrow it, or share it with other
-/// lifecycles; the pointer impls exist now because adding a blanket impl
-/// later would break a downstream impl for its own pointer type.
+/// WHY: pointer impls let lifecycles share one backend, and with it the
+/// backend's writer; they exist now because adding a blanket impl later
+/// would break a downstream impl for its own pointer type.
 macro_rules! forward_lifecycle_backend {
     ($($pointer:ty),+ $(,)?) => {$(
         impl<B: LifecycleBackend + ?Sized> LifecycleBackend for $pointer {
+            fn writer(&self) -> &WriterLock {
+                (**self).writer()
+            }
+
             fn read_head(&self, index: &IndexIdentity) -> Result<Option<Vec<u8>>, HeuremaError> {
                 (**self).read_head(index)
             }
@@ -358,6 +398,8 @@ pub struct StageWrite<'a> {
     pub index: &'a IndexIdentity,
     /// The version being staged.
     pub version: IndexVersion,
+    /// The operation the stage belongs to.
+    pub key: &'a OperationKey,
     /// The head the write was computed from; `None` when the index had no
     /// head.
     pub expected_head: Option<&'a [u8]>,
@@ -368,12 +410,13 @@ pub struct StageWrite<'a> {
 }
 
 impl<'a> StageWrite<'a> {
-    /// Describe a stage of `version` of `index`, computed from
-    /// `expected_head`.
+    /// Describe a stage of `version` of `index` for the operation `key`,
+    /// computed from `expected_head`.
     #[must_use]
     pub const fn new(
         index: &'a IndexIdentity,
         version: IndexVersion,
+        key: &'a OperationKey,
         expected_head: Option<&'a [u8]>,
         marker: &'a [u8],
         payload: &'a [u8],
@@ -381,6 +424,7 @@ impl<'a> StageWrite<'a> {
         Self {
             index,
             version,
+            key,
             expected_head,
             marker,
             payload,
