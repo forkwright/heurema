@@ -100,8 +100,8 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       - name: Build docs with warnings denied
         # WHY: rustdoc warnings, broken intra-doc links included, do not fail
-        # a plain `cargo doc`; four ambiguous `crate::rrf` links sat on main
-        # unnoticed until this job existed.
+        # a plain `cargo doc`; ambiguous `crate::rrf` links (function vs
+        # module) sat on main unnoticed until this job existed.
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps
@@ -116,7 +116,7 @@ jobs:
           persist-credentials: false
       - name: No stale krites-extraction framing
         # WHY: heurema#21's own Done-when names this exact pattern as the acceptance
-        # test for "Phase 2 is write-fresh, permanently" (locked in
+        # test for "the engines are written fresh, permanently" (locked in
         # _llm/decisions.toml's `heurema-phase-2-source-settled` entry). Two prior
         # sweeps (#18, #19, #22) each fixed a subset of surfaces and missed others,
         # so the check is codified rather than re-asserted by hand each time.
@@ -126,7 +126,7 @@ jobs:
         run: |
           if grep -rniE 'extract.*(hnsw|bm25|fts).*krites' --exclude-dir=.git --exclude-dir=.github .; then
             echo "::error::Stale krites-extraction framing found (heurema#21 regression)." >&2
-            echo "::error::Phase 2 is write-fresh, permanently — krites is behavioural" >&2
+            echo "::error::The engines are written fresh, permanently — krites is behavioural" >&2
             echo "::error::reference + conformance oracle only. See CLAUDE.md's Roadmap" >&2
             echo "::error::entry and _llm/decisions.toml's heurema-phase-2-source-settled." >&2
             exit 1

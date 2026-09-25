@@ -19,7 +19,8 @@ ranked scores with stable ties. It landed in PR #48 (fresh Simple-pipeline BM25)
 or filter pipeline returns `HeuremaError::NotYetImplemented` before it mutates state.
 
 Both engines were written fresh in this repository; CLAUDE.md's Roadmap records the ruling. The
-conformance oracle in `crates/heurema/tests/oracle/` runs every case live against both engines.
+conformance oracle in `crates/heurema/tests/oracle/` runs every BM25 and HNSW case live; none is
+ignored.
 
 `rrf` / `rrf_with_default` (reciprocal-rank fusion, `crates/heurema/src/rrf.rs`) is a complete,
 tested implementation: `f64` accumulation narrowed to a public `f32` score, a documented total-order
@@ -46,9 +47,10 @@ index and the records it was built from, become visible together.
 
 ## Status
 
-Phase 01 (fresh HNSW and BM25 engines) is complete. Phase 02, the durable retrieval lifecycle (named
-indexes, staged writes, one atomic publish point, recovery, and deletion rules), is next; the Datalog
-engine `akolouthia` follows it. CLAUDE.md's Roadmap carries the phase list.
+Phase 01 landed both fresh engines; its one open exit item is an independently written BM25 formula
+reference checked against `Bm25Index`. Phase 02, the durable retrieval lifecycle (named indexes, staged
+writes, one atomic publish point, recovery, and deletion rules), follows; the Datalog engine
+`akolouthia` comes after it. CLAUDE.md's Roadmap carries the phase list.
 
 ## API surface
 

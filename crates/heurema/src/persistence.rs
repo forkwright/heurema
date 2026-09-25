@@ -108,14 +108,14 @@ where
 /// WHY: Persistence remains outside HNSW and BM25 algorithms so consumers can
 /// choose fjall, in-memory, or engine-owned storage without changing indexes.
 ///
-/// WARNING: Phase 1 declared every method here generic over only
-/// `I: VectorIndex` / `I: FtsIndex`. Phase 3, landing this trait's first
-/// implementations (`atmis`, `thesauros`), adds `Serialize` to
+/// WARNING: The trait originally declared every method here generic over
+/// only `I: VectorIndex` / `I: FtsIndex`. Its first implementations
+/// (`atmis`, `thesauros`) added `Serialize` to
 /// the save methods and `DeserializeOwned` to the load methods. This is a
 /// signature change, not an addition beside the old one: neither
 /// `VectorIndex` nor `FtsIndex` exposes a constructor, so `load_vector_index`
 /// could never build a value of a caller-chosen `I` under the original
-/// bound, and `Ok` from either Phase 1 load method was structurally
+/// bound, and `Ok` from either original load method was structurally
 /// unreachable. `DeserializeOwned` supplies the missing construction path;
 /// `Serialize` is its mirror on save. The bound lives at the persistence
 /// boundary only. `VectorIndex` and `FtsIndex` themselves are unchanged.

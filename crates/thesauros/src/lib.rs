@@ -87,7 +87,7 @@ impl ThesaurosBackend {
     // `Ok` mean "durable", not merely "buffered" — the property that
     // separates this adapter from atmis. A backend intended for
     // high-throughput bulk loading could relax this to a caller-chosen
-    // `PersistMode` later; Phase 3 keeps it unconditional because no
+    // `PersistMode` later; the adapter keeps it unconditional because no
     // caller has asked for the weaker mode yet.
     fn sync(&self) -> Result<(), HeuremaError> {
         self.db

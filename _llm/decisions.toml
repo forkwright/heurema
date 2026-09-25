@@ -8,7 +8,7 @@ source_docs = [
 ]
 
 [decisions]
-summary = "Load-bearing decisions for heurema, for agents who land in this repo cold. Canonical planning lives in the fleet's private planning repository; superseded decisions stay here with status = \"superseded\" and name their successor."
+summary = "Load-bearing decisions for heurema, for agents who land in this repo cold. Canonical planning lives in the fleet's private planning repository; superseded decisions stay here with status = \"superseded\" and name their successor; a decision superseded only in part stays accepted and its consequences name the superseded part."
 
 [[decision]]
 id = "kanon-D-067"
@@ -71,7 +71,7 @@ id = "heurema-fleet-repo-conventions"
 title = "Conform to FLEET-REPO-SETUP.md"
 status = "accepted"
 context = "heurema joins the Tier U public fleet repos and inherits the same release-please, gate-attestation, and root-file conventions as aletheia, kanon, theatron."
-decision = "Ship release-please + gate-attestation workflows, the license recorded in heurema-license-interop, standards inherited from kanon/crates/basanos/standards/, and the _llm corpus on first commit."
+decision = "Ship release-please + gate-attestation workflows, the license (currently recorded in heurema-license-interop), standards inherited from kanon/crates/basanos/standards/, and the _llm corpus on first commit."
 consequences = "Public-mirror readiness from day one; downstream consumers can pin a git tag and rely on the required GitHub checks, gate-attestation among them; the Gate-Passed trailer itself became advisory fleet-wide."
 
 [[decision]]

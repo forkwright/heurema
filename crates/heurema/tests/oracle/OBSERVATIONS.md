@@ -58,7 +58,7 @@ Gathered from test and file names on the pinned tree's public test surface.
 | Results ordered by ascending distance, ties stable | `hnsw::query_results_satisfy_the_ranking_contract`, `hnsw::equal_distance_ties_order_by_ascending_id`, `hnsw::smaller_k_is_a_prefix_of_larger_k` |
 | Recall measured against exact top-k | `hnsw::recall_against_brute_force_meets_floor` (0.90 floor on a pinned 256-vector fixture) |
 | Query termination / bounded result sets on a dense fixture | `hnsw::queries_terminate_and_stay_bounded_on_a_dense_fixture` |
-| Random level distribution is non-degenerate | not trait-observable — graph-internal; unit-tested in `src/hnsw/engine.rs` (`base_graph_is_reachable_from_the_entry_point` asserts the geometric level distribution) |
+| Random level distribution is non-degenerate | not trait-observable — graph-internal; unit-tested in `src/hnsw/engine.rs` (`base_graph_is_reachable_from_the_entry_point` asserts that node counts strictly decrease across the lowest levels) |
 | HNSW result-cache eviction and retention | not covered — an engine-internal choice; the trait exposes no cache |
 | Storage-backed close/reopen preserves recall | not oracle territory — owned by the `PersistenceBackend` contract tests (`persistence_contract.rs`, the adapter test suites) |
 

@@ -3,7 +3,7 @@
 How heurēma's HNSW and BM25 implementations are measured against this oracle
 (heurema#29): what "reaches parity" means operationally.
 
-## Current state (green since PR #50)
+## Current state (oracle suite green since PR #50)
 
 Every BM25 and HNSW oracle case runs live against the fresh engines: BM25 for
 the `Simple` pipeline (PR #48) and the navigable HNSW graph (PR #50). No test in
@@ -14,9 +14,10 @@ the engines, as the green definition below requires.
 `cargo test -p heurema --test oracle` is the parity check.
 
 HNSW graph-internal invariants are unit-tested beside the engine in
-`src/hnsw/engine.rs`. BM25 formula internals are checked here only through
-trait-observable properties; an independently written formula reference is
-the open item that clause 4 below still asks for on the BM25 side.
+`src/hnsw/engine.rs` (clause 4 below). BM25 formula internals are checked here
+only through trait-observable properties. Phase 01's exit also requires an
+independently written BM25 formula reference checked against `Bm25Index`;
+that reference is not in this directory yet, so Phase 01 is not closed.
 
 ## Green definition (Phase 01 exit)
 

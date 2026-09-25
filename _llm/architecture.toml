@@ -9,7 +9,7 @@ source_docs = [
 ]
 
 [architecture]
-summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. Three crates: the traits-and-engines crate (HNSW, BM25, RRF, snapshot envelope), and two PersistenceBackend adapter siblings (atmis, thesauros) under the same workspace."
+summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. The workspace holds the traits-and-engines crate (heurema: HNSW, BM25, RRF, snapshot envelope) and its PersistenceBackend adapter siblings (atmis, thesauros)."
 layers = [
   "public-api",
   "errors",

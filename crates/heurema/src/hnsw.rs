@@ -60,8 +60,9 @@ pub struct HnswConfig {
 
 impl HnswConfig {
     /// WHY: Consumers need a minimal config constructor that preserves krites's
-    /// defaults (L2 distance, `ef_construction` 50, `m_neighbours` 16);
-    /// `HnswIndex` validates the result at its mutation and snapshot boundary.
+    /// defaults (`VectorDistance::L2` and the module's default
+    /// `ef_construction` / `m_neighbours` constants); `HnswIndex` validates
+    /// the result at its mutation and snapshot boundary.
     #[must_use]
     pub const fn new(dimensions: usize) -> Self {
         Self {

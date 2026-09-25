@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-No system dependencies. Pure-Rust workspace (`heurema`, `atmis`, `thesauros`). Headless CI compatible. `scripts/docs-drift.sh` runs the docs-drift guard locally.
+No system dependencies. Pure-Rust workspace (`heurema`, `atmis`, `thesauros`). Headless CI compatible. `scripts/docs-drift.sh` runs the cited-path and stub-wording checks locally.
 
 ## Standards
 

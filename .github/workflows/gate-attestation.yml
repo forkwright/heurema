@@ -16,18 +16,20 @@
 # forkwright/.github.
 #
 # NOTE: this is not the only compile of the workspace. ci.yml runs fmt,
-# check, clippy, nextest, doctests, and the docs-drift guard on every PR and
-# push to main; security.yml runs cargo-deny, cargo-audit, and osv-scanner;
-# codeql.yml runs CodeQL. heurema is a three-crate workspace (heurema, atmis,
-# thesauros) whose dependencies (snafu, serde, serde_json, fjall) are pure
-# Rust -- no C-binding crates, no GUI/OS-integration surface.
+# check, clippy, nextest, doctests, rustdoc (-D warnings), and the
+# docs-drift guard on every PR and push to main; security.yml runs
+# cargo-deny, cargo-audit, and osv-scanner; codeql.yml runs CodeQL. The
+# workspace crates (heurema, atmis, thesauros) depend only on pure-Rust
+# crates (snafu, serde, serde_json, fjall) -- no C bindings, no
+# GUI/OS-integration surface.
 #
 # NOTE: rust-toolchain.toml pins `channel = "stable"` -- auto-detect
 # applies, no rust_toolchain override. No `git =
 # "https://github.com/forkwright/..."` dependency in the root or
-# crates/heurema Cargo.toml (grepped directly) -- needs_fleet_repo_token
+# any workspace Cargo.toml (grepped directly) -- needs_fleet_repo_token
 # stays false. full-gate-build duplicates ci.yml's compile on trailer-less
-# PRs; that cost is accepted so the gate attests the build itself.
+# PRs and every push to main; that cost is accepted so the gate attests the
+# build itself.
 name: Gate Attestation
 
 on:
@@ -37,8 +39,8 @@ on:
   # carry the source commits' trailers, so no commit on main has a
   # Gate-Passed trailer -- check-trailer finds none and routes to
   # full-gate-build, which is the job that actually compiles the workspace.
-  # Without this nothing ever builds main, and the first PR to inherit a
-  # merged break is what discovers it (forkwright/theatron#235).
+  # Without this the gate never attests main; forkwright/theatron#235 is the
+  # merged break that went unnoticed until a later PR inherited it.
   push:
     branches: [main]
 

@@ -8,8 +8,8 @@ source_docs = [
 ]
 
 [state]
-summary = "Phase 01 is complete: fresh HNSW (an in-memory navigable graph) and BM25 (the Simple pipeline) implement VectorIndex and FtsIndex, the conformance oracle runs every case live, and both persistence adapters (atmis, thesauros) store versioned per-index snapshot envelopes. Reciprocal-rank fusion is implemented. Snapshots are whole-index saves, not transactions; Phase 02 adds the durable retrieval lifecycle, and the akolouthia Datalog engine (Phase 03) is not yet built. krites is behavioural reference and conformance oracle only, never a code source."
-current_phase = "Phase 01 fresh retrieval engines complete (BM25 #48, HNSW #50, versioned snapshots #51); Phase 02 durable retrieval lifecycle next"
+summary = "Phase 01 landed: fresh HNSW (an in-memory navigable graph) and BM25 (the Simple pipeline) implement VectorIndex and FtsIndex, the conformance oracle runs every case live, and both persistence adapters (atmis, thesauros) store versioned per-index snapshot envelopes. Reciprocal-rank fusion is implemented. Snapshots are whole-index saves, not transactions; Phase 02 adds the durable retrieval lifecycle, and the akolouthia Datalog engine (Phase 03) is not yet built. krites is behavioural reference and conformance oracle only, never a code source."
+current_phase = "Phase 01 fresh retrieval engines landed (BM25 #48, HNSW #50, versioned snapshots #51); its open exit item is an independently written BM25 formula reference; Phase 02 durable retrieval lifecycle follows"
 updated = "2026-09-25"
 
 [[recent]]
