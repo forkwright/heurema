@@ -171,17 +171,27 @@ impl<Id> Bm25Index<Id> {
     }
 
     fn simple_pipeline(&self) -> Result<(), HeuremaError> {
-        if self.config.tokenizer.name == SIMPLE_TOKENIZER
-            && self.config.tokenizer.args.is_empty()
-            && self.config.filters.is_empty()
-        {
-            return Ok(());
-        }
-        Err(NotYetImplementedSnafu {
-            feature: "BM25 tokenizer/filter pipeline beyond Simple".to_owned(),
-        }
-        .build())
+        require_simple_pipeline(&self.config)
     }
+}
+
+/// Refuses any analyzer pipeline other than the argument-less `Simple`
+/// tokenizer with no filters, as [`HeuremaError::NotYetImplemented`].
+///
+/// WHY: the engine and lifecycle validation refuse the same pipelines with the
+/// same error, so a configuration that validation accepts is one the engine
+/// can apply.
+pub(crate) fn require_simple_pipeline(config: &FtsConfig) -> Result<(), HeuremaError> {
+    if config.tokenizer.name == SIMPLE_TOKENIZER
+        && config.tokenizer.args.is_empty()
+        && config.filters.is_empty()
+    {
+        return Ok(());
+    }
+    Err(NotYetImplementedSnafu {
+        feature: "BM25 tokenizer/filter pipeline beyond Simple".to_owned(),
+    }
+    .build())
 }
 
 impl<Id> Bm25Index<Id>

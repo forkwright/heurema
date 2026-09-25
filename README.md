@@ -51,8 +51,8 @@ index and the records it was built from, become visible together.
 
 Phase 01 (fresh HNSW and BM25 engines, each checked against an independent oracle) is complete.
 Phase 02, the durable retrieval lifecycle (named indexes, staged writes, one atomic publish point,
-recovery, and deletion rules), has begun with its type vocabulary (`heurema::lifecycle`); storage,
-publish, and recovery follow. The Datalog engine `akolouthia` comes after it. CLAUDE.md's Roadmap
+recovery, and deletion rules), has begun with its type vocabulary and pre-publish validation
+(`heurema::lifecycle`); storage, publish, and recovery follow. The Datalog engine `akolouthia` comes after it. CLAUDE.md's Roadmap
 carries the phase list.
 
 ## API surface
@@ -75,7 +75,7 @@ use thesauros::ThesaurosBackend;
 - `PersistenceBackend` - save / load named vector and FTS indexes; backend-agnostic. `atmis`'s `AtmisBackend` and `thesauros`'s `ThesaurosBackend` both implement it.
 - `SnapshotEnvelope` / `SnapshotFamily` / `decode_snapshot_payload` - the versioned per-index snapshot format both adapters share.
 - `rrf` / `rrf_with_default` - reciprocal-rank fusion with the paper-standard `k = 60`.
-- `lifecycle` - the Phase 02 durable-lifecycle vocabulary, types only: `IndexIdentity` (`OwnerNamespace` plus `IndexName`), `OperationKey` / `OperationIdentity`, `IndexVersion`, `LifecycleOperation` / `IndexChange` / `LifecycleTransition`, `IndexRecord` / `IndexState`, and the `MemberIdentity` / `ProvenanceReference` / `RetentionReference` marker traits a consumer implements on its own types. `HeuremaError::category()` sorts every error into an `ErrorCategory`. Nothing in `lifecycle` reads or writes storage yet.
+- `lifecycle` - the Phase 02 durable-lifecycle vocabulary and its pre-publish validation: `IndexIdentity` (`OwnerNamespace` plus `IndexName`), `OperationKey` / `OperationIdentity` / `OperationDigest`, `IndexVersion`, `LifecycleOperation` / `IndexChange` / `LifecycleTransition`, `IndexRecord` / `IndexState`, and the `MemberIdentity` / `ProvenanceReference` / `RetentionReference` marker traits a consumer implements on its own types. `CheckedOperation::check` refuses an invalid operation without any index state and computes its digest (SHA-256 over a canonical encoding documented on `OperationDigest`); `CheckedOperation::permit` applies the permission table (`LifecycleTransition::is_permitted_from`) and the checks against the current record, yielding a `ValidatedOperation`. Both are pure functions. `HeuremaError::category()` sorts every error into an `ErrorCategory`. Nothing in `lifecycle` reads or writes storage yet.
 
 The index API is engine-agnostic: heurēma knows nothing about SQL or any consumer-owned query language,
 and it returns IDs and scores rather than consumer tuples.

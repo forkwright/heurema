@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::identity::{IndexIdentity, OperationKey};
 use super::member::{IndexMember, MemberIdentity, ProvenanceReference, RetentionReference};
+use super::record::IndexStateKind;
 use crate::{FtsConfig, HnswConfig, SnapshotFamily};
 
 /// The configuration a named index is created or rebuilt with.
@@ -58,6 +59,47 @@ pub enum LifecycleTransition {
     Recover,
     /// Destroy an active index under a retention reference.
     Destroy,
+}
+
+impl LifecycleTransition {
+    /// Whether this transition is permitted on an index in `state`.
+    ///
+    /// | transition | Absent | Active | Destroyed |
+    /// |---|---|---|---|
+    /// | Create | yes | no | no |
+    /// | Insert | no | yes | no |
+    /// | Remove | no | yes | no |
+    /// | Rebuild | no | yes | no |
+    /// | Destroy | no | yes | no |
+    /// | Publish | yes | yes | no |
+    /// | Recover | yes | yes | yes |
+    ///
+    /// A destroyed identity is never created again, because reusing it would
+    /// splice two audit histories into one.
+    ///
+    /// WHY exhaustive with no wildcard: a new transition or state does not
+    /// compile until every cell of its row or column is decided.
+    #[must_use]
+    pub const fn is_permitted_from(self, state: IndexStateKind) -> bool {
+        match (self, state) {
+            (Self::Create, IndexStateKind::Absent)
+            | (
+                Self::Insert | Self::Remove | Self::Rebuild | Self::Destroy,
+                IndexStateKind::Active,
+            )
+            | (Self::Publish, IndexStateKind::Absent | IndexStateKind::Active)
+            | (
+                Self::Recover,
+                IndexStateKind::Absent | IndexStateKind::Active | IndexStateKind::Destroyed,
+            ) => true,
+            (Self::Create, IndexStateKind::Active | IndexStateKind::Destroyed)
+            | (
+                Self::Insert | Self::Remove | Self::Rebuild | Self::Destroy,
+                IndexStateKind::Absent | IndexStateKind::Destroyed,
+            )
+            | (Self::Publish, IndexStateKind::Destroyed) => false,
+        }
+    }
 }
 
 /// The change one operation requests.

@@ -25,6 +25,11 @@ serde = { workspace = true }
 # concrete engine deserializes its payload.
 serde_json = { workspace = true }
 
+# WHY: CheckedOperation::check computes each lifecycle operation's
+# OperationDigest as SHA-256 over its canonical encoding
+# (src/lifecycle/digest.rs); see the workspace entry for why sha2.
+sha2 = { workspace = true }
+
 [lints]
 workspace = true
 

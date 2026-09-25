@@ -219,26 +219,7 @@ impl<Id> HnswIndex<Id> {
     }
 
     fn validate_vector(&self, vector: &[f32]) -> Result<(), HeuremaError> {
-        validate_config(&self.config).map_err(|reason| {
-            InvalidHnswConfigSnafu {
-                reason: reason.to_owned(),
-            }
-            .build()
-        })?;
-        if vector.len() != self.config.dimensions {
-            Err(DimensionMismatchSnafu {
-                expected: self.config.dimensions,
-                actual: vector.len(),
-            }
-            .build())
-        } else if !vector.iter().all(|component| component.is_finite()) {
-            Err(InvalidVectorSnafu {
-                reason: "all components must be finite".to_owned(),
-            }
-            .build())
-        } else {
-            Ok(())
-        }
+        check_vector(&self.config, vector)
     }
 }
 
@@ -734,6 +715,53 @@ fn select_entry<Id: Ord + Clone>(nodes: &BTreeMap<Id, Node<Id>>) -> Option<Id> {
         .filter(|(_, node)| node.level == max_level)
         .map(|(id, _)| id.clone())
         .next()
+}
+
+/// Refuses a configuration no graph can be built under, as
+/// [`HeuremaError::InvalidHnswConfig`].
+///
+/// WHY: the engine and lifecycle validation refuse the same configurations
+/// with the same error, so a configuration that validation accepts is one
+/// the engine accepts.
+pub(crate) fn check_config(config: &HnswConfig) -> Result<(), HeuremaError> {
+    validate_config(config).map_err(|reason| {
+        InvalidHnswConfigSnafu {
+            reason: reason.to_owned(),
+        }
+        .build()
+    })
+}
+
+/// Refuses a vector with a NaN or infinite component, as
+/// [`HeuremaError::InvalidVector`].
+pub(crate) fn check_finite(vector: &[f32]) -> Result<(), HeuremaError> {
+    if vector.iter().all(|component| component.is_finite()) {
+        Ok(())
+    } else {
+        Err(InvalidVectorSnafu {
+            reason: "all components must be finite".to_owned(),
+        }
+        .build())
+    }
+}
+
+/// Every check a vector passes before it enters or queries a graph built
+/// under `config`, in order: the configuration, the dimension, then finite
+/// components.
+///
+/// WHY: one function serves both the engine and lifecycle validation, so an
+/// operation that validation accepts is not refused when the engine applies
+/// it.
+pub(crate) fn check_vector(config: &HnswConfig, vector: &[f32]) -> Result<(), HeuremaError> {
+    check_config(config)?;
+    if vector.len() != config.dimensions {
+        return Err(DimensionMismatchSnafu {
+            expected: config.dimensions,
+            actual: vector.len(),
+        }
+        .build());
+    }
+    check_finite(vector)
 }
 
 fn validate_config(config: &HnswConfig) -> Result<(), &'static str> {

@@ -1,5 +1,6 @@
 //! The durable retrieval lifecycle's vocabulary: which index an operation
-//! names, what it asks to change, and which state the index is in.
+//! names, what it asks to change, and which state the index is in; and the
+//! pre-publish validation that refuses an invalid operation before any write.
 //!
 //! WHY: the lifecycle contract has to be readable from types before any
 //! durable write depends on it. A consumer can tell from these types alone
@@ -39,9 +40,24 @@
 //! - **Recover**, the step that repairs interrupted state after reopen, is
 //!   permitted from every state.
 //!
-//! This module states the table; it does not enforce it. Enforcement
-//! arrives with pre-publish validation, which refuses a disallowed
-//! transition before any write.
+//! [`LifecycleTransition::is_permitted_from`] encodes this table, and
+//! [`CheckedOperation::permit`] enforces it.
+//!
+//! # Validation
+//!
+//! An operation is validated in two pure stages, neither of which reads or
+//! writes a backend:
+//!
+//! 1. [`CheckedOperation::check`] runs every check that needs no index state
+//!    (empty or duplicate batches, member identity shape, non-finite
+//!    vectors, configuration validity, family and dimension agreement within
+//!    the operation) and computes the operation's [`OperationIdentity`]: its
+//!    key plus the [`OperationDigest`] of its canonical encoding.
+//! 2. [`CheckedOperation::permit`] takes the index's current record (`None`
+//!    when absent) and refuses a transition the table forbids, an Insert the
+//!    current configuration cannot hold, or a Rebuild that changes the
+//!    index's family. It yields a [`ValidatedOperation`], the only form of
+//!    an operation later lifecycle steps accept.
 //!
 //! # Consumer types
 //!
@@ -53,9 +69,9 @@
 //! # Limits
 //!
 //! Snapshots are not transactions; this module defines the durable
-//! lifecycle's vocabulary, not its storage. Nothing here reads or writes a
-//! backend, checks a transition against a state, or computes an
-//! [`OperationDigest`].
+//! lifecycle's vocabulary and validation, not its storage. Nothing here reads
+//! or writes a backend: validation and the digest are pure functions of the
+//! operation and the record the caller supplies.
 //!
 //! # Example
 //!
@@ -112,10 +128,12 @@
 //! # Ok::<(), heurema::HeuremaError>(())
 //! ```
 
+mod digest;
 mod identity;
 mod member;
 mod operation;
 mod record;
+mod validate;
 
 pub use identity::{
     IdentifierKind, IndexIdentity, IndexName, IndexVersion, OperationDigest, OperationIdentity,
@@ -126,6 +144,7 @@ pub use member::{
 };
 pub use operation::{IndexChange, IndexConfig, LifecycleOperation, LifecycleTransition};
 pub use record::{IndexRecord, IndexState, IndexStateKind};
+pub use validate::{CheckedOperation, ValidatedOperation};
 
 /// Opaque stand-ins for consumer types, shared by this module's unit tests.
 #[cfg(test)]

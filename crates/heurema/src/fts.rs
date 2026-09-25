@@ -9,6 +9,7 @@ use crate::HeuremaError;
 mod bm25;
 
 pub use bm25::Bm25Index;
+pub(crate) use bm25::require_simple_pipeline;
 
 /// WHY: Krites models tokenizers and filters as named components with argument
 /// lists; Heurēma keeps that shape without importing krites `DataValue`.

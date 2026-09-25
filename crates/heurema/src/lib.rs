@@ -36,10 +36,10 @@ pub use error::{ErrorCategory, HeuremaError, PersistenceSource};
 pub use fts::{Bm25Index, FtsConfig, FtsIndex, TokenizerConfig};
 pub use hnsw::{HnswConfig, HnswIndex, VectorDistance, VectorIndex};
 pub use lifecycle::{
-    IdentifierKind, IndexChange, IndexConfig, IndexIdentity, IndexMember, IndexName, IndexRecord,
-    IndexState, IndexStateKind, IndexVersion, LifecycleOperation, LifecycleTransition,
-    MemberContent, MemberIdentity, OperationDigest, OperationIdentity, OperationKey,
-    OwnerNamespace, ProvenanceReference, RetentionReference,
+    CheckedOperation, IdentifierKind, IndexChange, IndexConfig, IndexIdentity, IndexMember,
+    IndexName, IndexRecord, IndexState, IndexStateKind, IndexVersion, LifecycleOperation,
+    LifecycleTransition, MemberContent, MemberIdentity, OperationDigest, OperationIdentity,
+    OperationKey, OwnerNamespace, ProvenanceReference, RetentionReference, ValidatedOperation,
 };
 pub use persistence::{
     PersistenceBackend, SNAPSHOT_FORMAT_VERSION, SnapshotEnvelope, SnapshotFamily,

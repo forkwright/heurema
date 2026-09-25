@@ -9,6 +9,7 @@ use crate::HeuremaError;
 mod engine;
 
 pub use engine::HnswIndex;
+pub(crate) use engine::{check_config, check_finite, check_vector};
 
 const DEFAULT_EF_CONSTRUCTION: usize = 50;
 const DEFAULT_M_NEIGHBOURS: usize = 16;
