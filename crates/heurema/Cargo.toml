@@ -36,5 +36,5 @@ workspace = true
 maturity = "alpha"
 since = "2026-05-25"
 phase = "02"
-phase-description = "Phase 01 complete: HNSW graph, Simple-pipeline BM25 checked against an independent formula reference, RRF, versioned snapshot envelope; Phase 02 durable retrieval lifecycle next"
+phase-description = "Phase 01 complete: HNSW graph, Simple-pipeline BM25 checked against an independent formula reference, RRF, versioned snapshot envelope; Phase 02 durable retrieval lifecycle in progress"
 exit-criteria = "A named index has creation, replace/rebuild, atomic publish, reopen/recovery, deletion, and corruption rules; no durable mutation exposes an index version without its canonical identities and provenance mapping; adapter tests cover interruption boundaries and an independent model checks observable state after each operation"

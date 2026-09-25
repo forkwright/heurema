@@ -266,7 +266,7 @@ fn open_reports_persistence_error_when_path_is_not_a_directory() -> Result<(), H
 }
 
 /// WHY: a probe [`VectorIndex`] with a JSON shape incompatible with
-/// [`HnswIndex`] proves [`HeuremaError::Persistence`] is reachable from a
+/// [`HnswIndex`] proves [`HeuremaError::CorruptSnapshot`] is reachable from a
 /// genuine decode failure on the fjall-backed path too, not only from the
 /// not-found path or a directory-open failure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,17 +295,17 @@ impl VectorIndex for ProbeVectorIndex {
 }
 
 #[test]
-fn load_vector_index_reports_persistence_error_on_shape_mismatch() -> Result<(), HeuremaError> {
+fn load_vector_index_reports_corrupt_snapshot_on_shape_mismatch() -> Result<(), HeuremaError> {
     let dir = tempfile::tempdir().map_err(io_error)?;
     let backend = ThesaurosBackend::open(dir.path())?;
     backend.save_vector_index("catalog-entry", &HnswIndex::<u64>::new(HnswConfig::new(3)))?;
 
     match backend.load_vector_index::<ProbeVectorIndex>("catalog-entry") {
-        Err(HeuremaError::Persistence { .. }) => {}
+        Err(HeuremaError::CorruptSnapshot { .. }) => {}
         Ok(_) => {
             panic!("HnswIndex bytes must not decode as the incompatible ProbeVectorIndex shape")
         }
-        Err(other) => panic!("expected Persistence, got {other:?}"),
+        Err(other) => panic!("expected CorruptSnapshot, got {other:?}"),
     }
     Ok(())
 }

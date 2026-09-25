@@ -3,6 +3,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use crate::lifecycle::IdentifierKind;
+
 /// WHY: Backend errors are type-erased only at the persistence boundary while
 /// SNAFU still receives a concrete source type for error-chain reporting.
 #[derive(Debug, Clone)]
@@ -95,12 +97,42 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
-    /// WHY: persisted index bytes must name a supported snapshot format and
-    /// index family before an adapter decodes engine state.
-    #[snafu(display("unsupported index snapshot: {reason}"))]
+    /// WHY: persisted index bytes must name the index family the caller
+    /// loads before an adapter decodes engine state; bytes of another family
+    /// under the requested name are refused, never reinterpreted.
+    #[snafu(display("index snapshot does not match the requested family: {reason}"))]
     SnapshotFormat {
         /// Validation failure.
         reason: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: a snapshot whose format version this build does not read may be
+    /// valid for a newer build. It is its own variant, in the `Unsupported`
+    /// category, so a consumer never treats it as corrupt and overwrites it.
+    #[snafu(display(
+        "index snapshot format version {found} is not supported; this build reads version {supported}"
+    ))]
+    UnsupportedSnapshotVersion {
+        /// Format version the stored bytes declare.
+        found: u16,
+        /// Format version this build reads and writes.
+        supported: u16,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: stored bytes that cannot be decoded, or that decode into a state
+    /// violating an engine invariant, are corrupt rather than a backend I/O
+    /// failure; a consumer must rebuild them, and retrying the read cannot
+    /// help.
+    #[snafu(display("corrupt index snapshot: {source}"))]
+    CorruptSnapshot {
+        /// Decoder error describing why the bytes were refused.
+        source: PersistenceSource,
         /// Error creation location.
         #[snafu(implicit)]
         location: snafu::Location,
@@ -129,7 +161,8 @@ pub enum HeuremaError {
     },
 
     /// WHY: Storage failures are external to the index algorithms but still
-    /// need to remain in the same error chain for callers.
+    /// need to remain in the same error chain for callers. Stored bytes that
+    /// fail to decode are [`HeuremaError::CorruptSnapshot`], not this variant.
     #[snafu(display("persistence backend error: {source}"))]
     Persistence {
         /// Backend-specific source error.
@@ -150,4 +183,204 @@ pub enum HeuremaError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+
+    /// WHY: lifecycle identifiers become storage keys and audit references,
+    /// so a malformed one is refused when it is constructed, before any
+    /// record or key could carry it.
+    #[snafu(display("invalid {kind} {value:?}: {reason}"))]
+    InvalidIdentifier {
+        /// Which identifier was refused.
+        kind: IdentifierKind,
+        /// The refused value, truncated to its first 64 characters.
+        value: String,
+        /// Why the value was refused.
+        reason: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+}
+
+/// The class of failure a [`HeuremaError`] belongs to.
+///
+/// WHY: a consumer decides whether to retry, report, or repair by the class
+/// of a failure rather than by its variant. Every variant maps to exactly one
+/// category through [`HeuremaError::category`], so a new variant cannot leave
+/// a consumer's handling undefined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ErrorCategory {
+    /// The input was refused, on its own or against the current state,
+    /// before anything changed. The same input against the same state is
+    /// refused again.
+    Refused,
+    /// The named index or snapshot does not exist.
+    NotFound,
+    /// The input or the stored bytes ask for a capability or format this
+    /// build does not implement, such as an analyzer pipeline beyond `Simple`
+    /// or a snapshot format version newer than this build reads. Stored bytes
+    /// in this category may be valid for a newer build: do not overwrite them.
+    Unsupported,
+    /// Stored bytes are present but cannot be decoded, violate an engine
+    /// invariant, or belong to another index family. Retrying the read cannot
+    /// succeed; the stored state needs a rebuild.
+    Corrupt,
+    /// The persistence backend failed to encode, write, or read bytes; the
+    /// error's source chain carries the backend's cause. Whether a retry can
+    /// succeed depends on that cause.
+    Storage,
+}
+
+impl HeuremaError {
+    /// The class of failure this error belongs to.
+    ///
+    /// WHY: the match is exhaustive with no wildcard arm, so adding a
+    /// variant does not compile until it is given a category.
+    #[must_use]
+    pub const fn category(&self) -> ErrorCategory {
+        match self {
+            Self::DimensionMismatch { .. }
+            | Self::InvalidVector { .. }
+            | Self::DistanceNotRepresentable { .. }
+            | Self::InvalidHnswConfig { .. }
+            | Self::InvalidKConstant { .. }
+            | Self::InvalidIdentifier { .. } => ErrorCategory::Refused,
+            Self::IndexNotFound { .. } => ErrorCategory::NotFound,
+            Self::NotYetImplemented { .. } | Self::UnsupportedSnapshotVersion { .. } => {
+                ErrorCategory::Unsupported
+            }
+            Self::SnapshotFormat { .. } | Self::CorruptSnapshot { .. } => ErrorCategory::Corrupt,
+            Self::Persistence { .. } => ErrorCategory::Storage,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use snafu::IntoError;
+
+    use super::*;
+
+    /// One sample of every variant.
+    fn every_variant() -> Vec<HeuremaError> {
+        vec![
+            DimensionMismatchSnafu {
+                expected: 3_usize,
+                actual: 2_usize,
+            }
+            .build(),
+            InvalidVectorSnafu { reason: "NaN" }.build(),
+            DistanceNotRepresentableSnafu { reason: "overflow" }.build(),
+            InvalidHnswConfigSnafu { reason: "zero" }.build(),
+            SnapshotFormatSnafu {
+                reason: "wrong family",
+            }
+            .build(),
+            UnsupportedSnapshotVersionSnafu {
+                found: 2_u16,
+                supported: 1_u16,
+            }
+            .build(),
+            CorruptSnapshotSnafu.into_error(PersistenceSource::new(std::io::Error::other("torn"))),
+            InvalidKConstantSnafu {
+                k_constant: -1.0_f32,
+            }
+            .build(),
+            IndexNotFoundSnafu { name: "missing" }.build(),
+            PersistenceSnafu.into_error(PersistenceSource::new(std::io::Error::other("disk"))),
+            NotYetImplementedSnafu { feature: "NGram" }.build(),
+            InvalidIdentifierSnafu {
+                kind: IdentifierKind::IndexName,
+                value: "a/b",
+                reason: "slash",
+            }
+            .build(),
+        ]
+    }
+
+    /// The expected category of each variant, one arm per variant and no
+    /// wildcard, written independently of `category()`'s grouping. A new
+    /// variant fails to compile here until it has an arm, and the arm's name
+    /// must then appear among `every_variant()`'s samples.
+    fn expected(error: &HeuremaError) -> (&'static str, ErrorCategory) {
+        match error {
+            HeuremaError::DimensionMismatch { .. } => ("DimensionMismatch", ErrorCategory::Refused),
+            HeuremaError::InvalidVector { .. } => ("InvalidVector", ErrorCategory::Refused),
+            HeuremaError::DistanceNotRepresentable { .. } => {
+                ("DistanceNotRepresentable", ErrorCategory::Refused)
+            }
+            HeuremaError::InvalidHnswConfig { .. } => ("InvalidHnswConfig", ErrorCategory::Refused),
+            HeuremaError::SnapshotFormat { .. } => ("SnapshotFormat", ErrorCategory::Corrupt),
+            HeuremaError::UnsupportedSnapshotVersion { .. } => {
+                ("UnsupportedSnapshotVersion", ErrorCategory::Unsupported)
+            }
+            HeuremaError::CorruptSnapshot { .. } => ("CorruptSnapshot", ErrorCategory::Corrupt),
+            HeuremaError::InvalidKConstant { .. } => ("InvalidKConstant", ErrorCategory::Refused),
+            HeuremaError::IndexNotFound { .. } => ("IndexNotFound", ErrorCategory::NotFound),
+            HeuremaError::Persistence { .. } => ("Persistence", ErrorCategory::Storage),
+            HeuremaError::NotYetImplemented { .. } => {
+                ("NotYetImplemented", ErrorCategory::Unsupported)
+            }
+            HeuremaError::InvalidIdentifier { .. } => ("InvalidIdentifier", ErrorCategory::Refused),
+        }
+    }
+
+    #[test]
+    fn error_category_classifies_every_variant() {
+        let samples = every_variant();
+        let mut named = BTreeSet::new();
+        for error in &samples {
+            let (name, category) = expected(error);
+            assert_eq!(error.category(), category, "{name}: {error}");
+            assert!(named.insert(name), "{name} is sampled twice");
+        }
+        assert_eq!(
+            named,
+            BTreeSet::from([
+                "CorruptSnapshot",
+                "DimensionMismatch",
+                "DistanceNotRepresentable",
+                "IndexNotFound",
+                "InvalidHnswConfig",
+                "InvalidIdentifier",
+                "InvalidKConstant",
+                "InvalidVector",
+                "NotYetImplemented",
+                "Persistence",
+                "SnapshotFormat",
+                "UnsupportedSnapshotVersion",
+            ]),
+            "every variant is sampled"
+        );
+    }
+
+    #[test]
+    fn error_size_stays_within_the_result_large_err_threshold() {
+        // WHY: clippy's `result_large_err` fires on every function returning
+        // `Result<_, HeuremaError>` once the error exceeds 128 bytes, across
+        // heurema, atmis, thesauros, and their tests, and CI denies warnings.
+        // A variant with a large payload must box it; this test fails here
+        // first instead of the lint firing workspace-wide.
+        let size = std::mem::size_of::<HeuremaError>();
+        assert!(
+            size <= 128,
+            "HeuremaError is {size} bytes; box the new payload"
+        );
+    }
+
+    #[test]
+    fn invalid_identifier_display_names_kind_value_and_reason() {
+        let error = InvalidIdentifierSnafu {
+            kind: IdentifierKind::OwnerNamespace,
+            value: "Example",
+            reason: "has 'E' at byte 0",
+        }
+        .build();
+        assert_eq!(
+            error.to_string(),
+            r#"invalid owner namespace "Example": has 'E' at byte 0"#
+        );
+    }
 }

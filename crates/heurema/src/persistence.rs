@@ -3,15 +3,23 @@
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Serialize};
 
-use crate::error::SnapshotFormatSnafu;
+use crate::error::{SnapshotFormatSnafu, UnsupportedSnapshotVersionSnafu};
 use crate::{FtsIndex, HeuremaError, PersistenceSource, VectorIndex};
 
 /// Current on-disk and in-memory snapshot envelope version.
 pub const SNAPSHOT_FORMAT_VERSION: u16 = 1;
 
 /// The index family whose payload an adapter snapshot contains.
+///
+/// The same discriminant names a lifecycle index's family
+/// ([`IndexConfig::family`](crate::IndexConfig::family)), and so which
+/// [`MemberContent`](crate::MemberContent) the index accepts.
+///
+/// WHY `#[non_exhaustive]`: a new index family must be addable without
+/// breaking every consumer that matches on this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub enum SnapshotFamily {
     /// A [`VectorIndex`] payload.
     Vector,
@@ -45,8 +53,9 @@ fn validate_header(
     expected: SnapshotFamily,
 ) -> Result<(), HeuremaError> {
     if format_version != SNAPSHOT_FORMAT_VERSION {
-        return Err(SnapshotFormatSnafu {
-            reason: format!("format version {format_version} is unsupported"),
+        return Err(UnsupportedSnapshotVersionSnafu {
+            found: format_version,
+            supported: SNAPSHOT_FORMAT_VERSION,
         }
         .build());
     }
@@ -59,8 +68,9 @@ fn validate_header(
     Ok(())
 }
 
+#[track_caller]
 fn decode_error(source: serde_json::Error) -> HeuremaError {
-    HeuremaError::Persistence {
+    HeuremaError::CorruptSnapshot {
         source: PersistenceSource::new(source),
         location: std::panic::Location::caller(),
     }
@@ -91,9 +101,11 @@ impl<T> SnapshotEnvelope<T> {
 /// Decode one adapter snapshot after validating its format header.
 ///
 /// The header deliberately uses [`IgnoredAny`] for `payload`, so an
-/// unsupported version or wrong family is refused before a concrete index
-/// deserializer receives an incompatible payload. Malformed header/current
-/// payload bytes remain [`HeuremaError::Persistence`] decode errors.
+/// unsupported version ([`HeuremaError::UnsupportedSnapshotVersion`]) or a
+/// wrong family ([`HeuremaError::SnapshotFormat`]) is refused before a
+/// concrete index deserializer receives an incompatible payload. Bytes that
+/// do not decode, including unversioned, torn, or invariant-violating
+/// snapshots, are [`HeuremaError::CorruptSnapshot`].
 pub fn decode_snapshot_payload<T>(bytes: &[u8], expected: SnapshotFamily) -> Result<T, HeuremaError>
 where
     T: DeserializeOwned,
@@ -141,9 +153,11 @@ pub trait PersistenceBackend {
     /// # Errors
     ///
     /// Returns [`HeuremaError::IndexNotFound`] when no snapshot exists under
-    /// `name`, [`HeuremaError::SnapshotFormat`] for a decoded envelope with an
-    /// unsupported version or wrong family, and [`HeuremaError::Persistence`]
-    /// on storage failure or when the stored bytes do not decode as `I`.
+    /// `name`, [`HeuremaError::UnsupportedSnapshotVersion`] for an envelope
+    /// whose format version this build does not read,
+    /// [`HeuremaError::SnapshotFormat`] for an envelope of the wrong family,
+    /// [`HeuremaError::CorruptSnapshot`] when the stored bytes do not decode
+    /// as `I`, and [`HeuremaError::Persistence`] on storage failure.
     fn load_vector_index<I>(&self, name: &str) -> Result<I, HeuremaError>
     where
         I: VectorIndex + DeserializeOwned;
@@ -169,9 +183,11 @@ pub trait PersistenceBackend {
     /// # Errors
     ///
     /// Returns [`HeuremaError::IndexNotFound`] when no snapshot exists under
-    /// `name`, [`HeuremaError::SnapshotFormat`] for a decoded envelope with an
-    /// unsupported version or wrong family, and [`HeuremaError::Persistence`]
-    /// on storage failure or when the stored bytes do not decode as `I`.
+    /// `name`, [`HeuremaError::UnsupportedSnapshotVersion`] for an envelope
+    /// whose format version this build does not read,
+    /// [`HeuremaError::SnapshotFormat`] for an envelope of the wrong family,
+    /// [`HeuremaError::CorruptSnapshot`] when the stored bytes do not decode
+    /// as `I`, and [`HeuremaError::Persistence`] on storage failure.
     fn load_fts_index<I>(&self, name: &str) -> Result<I, HeuremaError>
     where
         I: FtsIndex + DeserializeOwned;
@@ -194,29 +210,51 @@ mod tests {
             family: SnapshotFamily::Vector,
             payload: 7_u64,
         };
-        assert!(matches!(
-            future.into_payload(SnapshotFamily::Vector),
-            Err(HeuremaError::SnapshotFormat { .. })
-        ));
+        let refusal = future
+            .into_payload(SnapshotFamily::Vector)
+            .expect_err("a future format version is refused");
+        assert!(
+            matches!(
+                refusal,
+                HeuremaError::UnsupportedSnapshotVersion { found, supported, .. }
+                    if found == SNAPSHOT_FORMAT_VERSION + 1 && supported == SNAPSHOT_FORMAT_VERSION
+            ),
+            "a future version is unsupported, not corrupt: {refusal:?}"
+        );
+        assert_eq!(
+            refusal.category(),
+            crate::ErrorCategory::Unsupported,
+            "bytes from a newer build must not be classed as corrupt"
+        );
 
         let wrong_family = SnapshotEnvelope::new(SnapshotFamily::Fts, 7_u64);
-        assert!(matches!(
-            wrong_family.into_payload(SnapshotFamily::Vector),
-            Err(HeuremaError::SnapshotFormat { .. })
-        ));
+        let refusal = wrong_family
+            .into_payload(SnapshotFamily::Vector)
+            .expect_err("a wrong family is refused");
+        assert!(
+            matches!(refusal, HeuremaError::SnapshotFormat { .. }),
+            "a wrong family is a format refusal: {refusal:?}"
+        );
+        assert_eq!(
+            refusal.category(),
+            crate::ErrorCategory::Corrupt,
+            "wrong family"
+        );
     }
 
     #[test]
     fn unversioned_or_torn_bytes_cannot_decode_as_a_valid_envelope() {
         let unversioned = br#"{"config":{},"nodes":{}}"#;
         let torn = br#"{"format_version":1,"family":"Vector""#;
-        assert!(matches!(
-            decode_snapshot_payload::<serde_json::Value>(unversioned, SnapshotFamily::Vector),
-            Err(HeuremaError::Persistence { .. })
-        ));
-        assert!(matches!(
-            decode_snapshot_payload::<serde_json::Value>(torn, SnapshotFamily::Vector),
-            Err(HeuremaError::Persistence { .. })
-        ));
+        for (label, bytes) in [("unversioned", &unversioned[..]), ("torn", &torn[..])] {
+            let refusal =
+                decode_snapshot_payload::<serde_json::Value>(bytes, SnapshotFamily::Vector)
+                    .expect_err("undecodable bytes are refused");
+            assert!(
+                matches!(refusal, HeuremaError::CorruptSnapshot { .. }),
+                "{label} bytes are corrupt, not a backend failure: {refusal:?}"
+            );
+            assert_eq!(refusal.category(), crate::ErrorCategory::Corrupt, "{label}");
+        }
     }
 }

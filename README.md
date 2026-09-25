@@ -35,8 +35,10 @@ disk; every test in this repo can run against it without filesystem I/O. `thesau
 fsyncs (`fjall::PersistMode::SyncAll`) after every write, so a save that returns `Ok` is durable before
 the caller observes it. Both wrap each index in a versioned `SnapshotEnvelope` (format version plus
 `SnapshotFamily`), encode it through `serde_json`, and load through `decode_snapshot_payload`, which
-refuses an unsupported version or the wrong family with `HeuremaError::SnapshotFormat` before the
-index's own decoder runs (PR #51, versioned individual snapshots). A caller-chosen index type needs
+refuses a format version this build does not read (`HeuremaError::UnsupportedSnapshotVersion`) or the
+wrong family (`HeuremaError::SnapshotFormat`) before the index's own decoder runs, and reports bytes
+that do not decode as `HeuremaError::CorruptSnapshot` (PR #51, versioned individual snapshots). Each
+error names its class through `HeuremaError::category()`. A caller-chosen index type needs
 `Serialize` on save and `DeserializeOwned` on load; see `persistence.rs` for why the trait carries that
 bound. Neither crate is named `heurema-*`: see the `WHY` comment on the workspace `Cargo.toml`
 `[workspace.dependencies]` block for why (`NAMING.md` forbids that shape; both are independent GNOMON
@@ -49,7 +51,8 @@ index and the records it was built from, become visible together.
 
 Phase 01 (fresh HNSW and BM25 engines, each checked against an independent oracle) is complete.
 Phase 02, the durable retrieval lifecycle (named indexes, staged writes, one atomic publish point,
-recovery, and deletion rules), is next; the Datalog engine `akolouthia` follows it. CLAUDE.md's Roadmap
+recovery, and deletion rules), has begun with its type vocabulary (`heurema::lifecycle`); storage,
+publish, and recovery follow. The Datalog engine `akolouthia` comes after it. CLAUDE.md's Roadmap
 carries the phase list.
 
 ## API surface
@@ -72,6 +75,7 @@ use thesauros::ThesaurosBackend;
 - `PersistenceBackend` - save / load named vector and FTS indexes; backend-agnostic. `atmis`'s `AtmisBackend` and `thesauros`'s `ThesaurosBackend` both implement it.
 - `SnapshotEnvelope` / `SnapshotFamily` / `decode_snapshot_payload` - the versioned per-index snapshot format both adapters share.
 - `rrf` / `rrf_with_default` - reciprocal-rank fusion with the paper-standard `k = 60`.
+- `lifecycle` - the Phase 02 durable-lifecycle vocabulary, types only: `IndexIdentity` (`OwnerNamespace` plus `IndexName`), `OperationKey` / `OperationIdentity`, `IndexVersion`, `LifecycleOperation` / `IndexChange` / `LifecycleTransition`, `IndexRecord` / `IndexState`, and the `MemberIdentity` / `ProvenanceReference` / `RetentionReference` marker traits a consumer implements on its own types. `HeuremaError::category()` sorts every error into an `ErrorCategory`. Nothing in `lifecycle` reads or writes storage yet.
 
 The index API is engine-agnostic: heurēma knows nothing about SQL or any consumer-owned query language,
 and it returns IDs and scores rather than consumer tuples.
