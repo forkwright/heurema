@@ -26,13 +26,14 @@ Particularly relevant:
 ```
 Cargo.toml           # workspace root
 crates/heurema/      # traits, HNSW + BM25 engines, RRF, snapshot envelope,
-                     # durable-lifecycle vocabulary
+                     # durable-lifecycle vocabulary and validation
   src/               # lib.rs, error.rs, fts.rs (+ fts/bm25.rs),
                      # hnsw.rs (+ hnsw/engine.rs), lifecycle.rs (+ lifecycle/
-                     # identity.rs, member.rs, operation.rs, record.rs),
-                     # persistence.rs, rrf.rs
+                     # digest.rs, identity.rs, member.rs, operation.rs,
+                     # record.rs, validate.rs), persistence.rs, rrf.rs
   tests/             # api_smoke.rs, bm25_lifecycle.rs, bm25_snapshot.rs,
-                     # index_rrf_composition.rs, oracle/,
+                     # index_rrf_composition.rs, lifecycle_digest.rs,
+                     # lifecycle_validation.rs, oracle/,
                      # persistence_contract.rs, persistence_schema_closed.rs,
                      # rrf_correctness.rs
 crates/atmis/        # in-memory PersistenceBackend adapter (ἀτμίς, vapor)
@@ -61,6 +62,7 @@ cargo test --workspace
 
 - **Errors:** one `snafu` enum, `HeuremaError` (`#[non_exhaustive]`), with `#[snafu(implicit)] location` on every variant. Inside `heurema`, errors are mostly built through context selectors (`SnapshotFormatSnafu { .. }.build()`, `ensure!`). The selectors are unreachable outside the crate (`mod error` is private), so `persistence.rs`'s decode helper and the adapter crates construct variants directly with `location: std::panic::Location::caller()`. `PersistenceSource` type-erases only at the backend boundary. `HeuremaError::category()` maps every variant to one `ErrorCategory` through an exhaustive match with no `_` arm.
 - **Lifecycle vocabulary:** `lifecycle` holds the Phase 02 types (index and operation identity, transitions, the index record) and performs no I/O yet. Identifier newtypes construct only through `TryFrom` (never `From<&str>`) and deserialize through it. Member identity, provenance, and retention are consumer-owned newtypes implementing heurēma's marker traits, which are never blanket-implemented; heurēma defines no provenance or retention shape.
+- **Lifecycle validation:** `CheckedOperation::check` (stateless checks plus the `OperationDigest`) and then `permit` (the permission table and checks against the current record) are pure functions; only a `ValidatedOperation` may be staged. Validation calls the engines' own checks (`check_vector`, `require_simple_pipeline`), so an operation it accepts is not refused on apply. The digest is SHA-256 over a private canonical serde encoder (`src/lifecycle/digest.rs`, grammar documented on `OperationDigest`), never over `serde_json` output: it refuses floats in consumer types and sorts map entries itself.
 - **Traits:** `VectorIndex`, `FtsIndex`, `PersistenceBackend` carry the cross-engine contracts. Default methods exist only where the override would be uniform across implementors (e.g., `is_empty`).
 - **Unsupported configurations:** `HnswIndex` (`src/hnsw/engine.rs`) and `Bm25Index` (`src/fts/bm25.rs`) are real engines. `Bm25Index` implements only the argument-less `Simple` tokenizer with no filters; any other analyzer pipeline returns `HeuremaError::NotYetImplemented` before it mutates state.
 - **Persistence adapters:** `AtmisBackend` and `ThesaurosBackend` both wrap each index in a versioned `SnapshotEnvelope` and encode through `serde_json`, never by cloning the live `I` — that byte-level round trip is what proves the encode/decode path a durable backend depends on. Loads go through `decode_snapshot_payload`, which refuses an unsupported format version or the wrong `SnapshotFamily` before the index decoder runs. A snapshot is one index's whole-state save, never a transaction. `PersistenceBackend`'s save methods bound `I: Serialize`, its load methods bound `I: DeserializeOwned` (`persistence.rs`); a caller-chosen index type needs both derives to satisfy an adapter.

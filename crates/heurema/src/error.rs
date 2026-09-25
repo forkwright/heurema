@@ -3,7 +3,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crate::lifecycle::IdentifierKind;
+use crate::SnapshotFamily;
+use crate::lifecycle::{IdentifierKind, IndexIdentity, IndexStateKind, LifecycleTransition};
 
 /// WHY: Backend errors are type-erased only at the persistence boundary while
 /// SNAFU still receives a concrete source type for error-chain reporting.
@@ -199,6 +200,74 @@ pub enum HeuremaError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+
+    /// WHY: an index's family fixes which member content it accepts, and a
+    /// named index keeps one family for life, so content or a rebuild of the
+    /// other family is refused before anything is staged.
+    #[snafu(display("index family mismatch: expected {expected:?}, got {actual:?}"))]
+    FamilyMismatch {
+        /// The family the index, configuration, or batch requires.
+        expected: SnapshotFamily,
+        /// The family the operation supplied.
+        actual: SnapshotFamily,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: one operation that names a member twice has no single meaning
+    /// (which content or provenance wins?), and its digest would depend on
+    /// the order the duplicates arrived in, so it is refused outright.
+    #[snafu(display("member {member} appears more than once in one operation"))]
+    DuplicateMember {
+        /// The repeated member identity's `Debug` form, truncated to its
+        /// first 64 characters.
+        member: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: an insert or remove that names no members would publish a new
+    /// version identical to the old one; it is almost always a caller bug,
+    /// so it is refused rather than recorded.
+    #[snafu(display("{transition:?} operation names no members"))]
+    EmptyBatch {
+        /// The transition whose batch was empty.
+        transition: LifecycleTransition,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: the lifecycle's permission table decides which transitions each
+    /// state allows; a transition outside it is refused before any write, and
+    /// the error names the index, the transition, and the state it met.
+    #[snafu(display("{transition:?} is not permitted on index {index} in state {state:?}"))]
+    TransitionNotPermitted {
+        /// The index the operation targets.
+        index: IndexIdentity,
+        /// The refused transition.
+        transition: LifecycleTransition,
+        /// The index's state when the transition was requested.
+        state: IndexStateKind,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: an operation's digest is computed over a canonical encoding that
+    /// admits no floating-point numbers and only string or integer map keys.
+    /// A consumer member identity, provenance, or retention value outside
+    /// that grammar is the caller's input to fix, not a storage failure.
+    #[snafu(display("operation has no canonical encoding: {reason}"))]
+    UnencodableOperation {
+        /// Why the encoder refused the operation.
+        reason: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 /// The class of failure a [`HeuremaError`] belongs to.
@@ -244,7 +313,12 @@ impl HeuremaError {
             | Self::DistanceNotRepresentable { .. }
             | Self::InvalidHnswConfig { .. }
             | Self::InvalidKConstant { .. }
-            | Self::InvalidIdentifier { .. } => ErrorCategory::Refused,
+            | Self::InvalidIdentifier { .. }
+            | Self::FamilyMismatch { .. }
+            | Self::DuplicateMember { .. }
+            | Self::EmptyBatch { .. }
+            | Self::TransitionNotPermitted { .. }
+            | Self::UnencodableOperation { .. } => ErrorCategory::Refused,
             Self::IndexNotFound { .. } => ErrorCategory::NotFound,
             Self::NotYetImplemented { .. } | Self::UnsupportedSnapshotVersion { .. } => {
                 ErrorCategory::Unsupported
@@ -297,7 +371,34 @@ mod tests {
                 reason: "slash",
             }
             .build(),
+            FamilyMismatchSnafu {
+                expected: SnapshotFamily::Vector,
+                actual: SnapshotFamily::Fts,
+            }
+            .build(),
+            DuplicateMemberSnafu { member: "7" }.build(),
+            EmptyBatchSnafu {
+                transition: LifecycleTransition::Insert,
+            }
+            .build(),
+            TransitionNotPermittedSnafu {
+                index: sample_index(),
+                transition: LifecycleTransition::Create,
+                state: IndexStateKind::Destroyed,
+            }
+            .build(),
+            UnencodableOperationSnafu { reason: "f64" }.build(),
         ]
+    }
+
+    fn sample_index() -> IndexIdentity {
+        let (Ok(namespace), Ok(name)) = (
+            crate::OwnerNamespace::try_from("example"),
+            crate::IndexName::try_from("notes"),
+        ) else {
+            panic!("sample identifiers are grammar-conformant");
+        };
+        IndexIdentity::new(namespace, name)
     }
 
     /// The expected category of each variant, one arm per variant and no
@@ -324,6 +425,15 @@ mod tests {
                 ("NotYetImplemented", ErrorCategory::Unsupported)
             }
             HeuremaError::InvalidIdentifier { .. } => ("InvalidIdentifier", ErrorCategory::Refused),
+            HeuremaError::FamilyMismatch { .. } => ("FamilyMismatch", ErrorCategory::Refused),
+            HeuremaError::DuplicateMember { .. } => ("DuplicateMember", ErrorCategory::Refused),
+            HeuremaError::EmptyBatch { .. } => ("EmptyBatch", ErrorCategory::Refused),
+            HeuremaError::TransitionNotPermitted { .. } => {
+                ("TransitionNotPermitted", ErrorCategory::Refused)
+            }
+            HeuremaError::UnencodableOperation { .. } => {
+                ("UnencodableOperation", ErrorCategory::Refused)
+            }
         }
     }
 
@@ -342,6 +452,9 @@ mod tests {
                 "CorruptSnapshot",
                 "DimensionMismatch",
                 "DistanceNotRepresentable",
+                "DuplicateMember",
+                "EmptyBatch",
+                "FamilyMismatch",
                 "IndexNotFound",
                 "InvalidHnswConfig",
                 "InvalidIdentifier",
@@ -350,6 +463,8 @@ mod tests {
                 "NotYetImplemented",
                 "Persistence",
                 "SnapshotFormat",
+                "TransitionNotPermitted",
+                "UnencodableOperation",
                 "UnsupportedSnapshotVersion",
             ]),
             "every variant is sampled"
@@ -382,5 +497,52 @@ mod tests {
             error.to_string(),
             r#"invalid owner namespace "Example": has 'E' at byte 0"#
         );
+    }
+
+    #[test]
+    fn lifecycle_refusals_display_what_was_refused() {
+        let cases = [
+            (
+                FamilyMismatchSnafu {
+                    expected: SnapshotFamily::Vector,
+                    actual: SnapshotFamily::Fts,
+                }
+                .build(),
+                "index family mismatch: expected Vector, got Fts",
+            ),
+            (
+                DuplicateMemberSnafu {
+                    member: "TestMember(7)",
+                }
+                .build(),
+                "member TestMember(7) appears more than once in one operation",
+            ),
+            (
+                EmptyBatchSnafu {
+                    transition: LifecycleTransition::Remove,
+                }
+                .build(),
+                "Remove operation names no members",
+            ),
+            (
+                TransitionNotPermittedSnafu {
+                    index: sample_index(),
+                    transition: LifecycleTransition::Insert,
+                    state: IndexStateKind::Absent,
+                }
+                .build(),
+                "Insert is not permitted on index example/notes in state Absent",
+            ),
+            (
+                UnencodableOperationSnafu {
+                    reason: "a map key encodes as a sequence",
+                }
+                .build(),
+                "operation has no canonical encoding: a map key encodes as a sequence",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected, "{error:?}");
+        }
     }
 }

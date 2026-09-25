@@ -19,12 +19,13 @@ layers = [
   "persistence-adapters",
   "rank-fusion",
   "lifecycle-vocabulary",
+  "lifecycle-validation",
 ]
 
 [[architecture.crates]]
 name = "heurema"
 path = "crates/heurema"
-role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary (lifecycle module: identities, operations, transitions, index record; types only, no storage yet), and the workspace error chain with its ErrorCategory classification."
+role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary and pre-publish validation (lifecycle module: identities, operations, transitions, index record, CheckedOperation / ValidatedOperation, the canonical OperationDigest; pure functions, no storage yet), and the workspace error chain with its ErrorCategory classification."
 
 [[architecture.crates]]
 name = "atmis"
@@ -161,3 +162,21 @@ crate = "heurema"
 kind = "trait"
 name = "ProvenanceReference"
 purpose = "Marker trait a consumer implements on its own provenance newtype; never blanket-implemented, so () or a bare String cannot stand in. heurema defines no provenance shape. MemberIdentity and RetentionReference follow the same rule."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "CheckedOperation"
+purpose = "A LifecycleOperation that passed every stateless check, in a documented order (empty batch, duplicate member, member identity shape, non-finite vector, configuration validity through the engines' own checks, Rebuild member family and dimension, mixed-family Insert, canonical encodability), plus its OperationIdentity. check() is a pure function; permit(current record) applies the permission table and the checks against the current configuration and yields a ValidatedOperation."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "ValidatedOperation"
+purpose = "A CheckedOperation permitted against the index's current record; constructible only through CheckedOperation::permit, so it is the only form of an operation later lifecycle steps (staging, publish) accept. Carries the identity, the operation, and the state it was permitted from."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "OperationDigest"
+purpose = "SHA-256 over the domain prefix heurema.lifecycle.operation.v1 and the operation's canonical encoding, written by a private serde serializer with a fixed byte grammar documented on the type: sorted map entries, string or integer keys only, floats refused in consumer types, vector components as f32 bit patterns, members sorted by identity, the key not hashed."
