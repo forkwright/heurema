@@ -15,24 +15,21 @@
 # hybrid-gate.yml (declaring both workflow_call inputs) is now live at
 # forkwright/.github.
 #
-# WARNING(UNVERIFIED, but low risk): heurema has NO ci.yml / test / build
-# workflow -- only gate-attestation.yml, release-please.yml, and
-# security.yml (cargo-deny + cargo-audit; no compile/test step, no
-# osv-scanner unlike theatron). So `full-gate-build` below will be the
-# first-ever compile of this workspace in CI. Risk is low relative to
-# theatron: heurema is a single-crate workspace
-# (`[package.metadata.kanon] maturity = "alpha", phase = "1"`, description
-# "scaffold + API + RRF; HNSW/FTS stubbed pending krites extraction") whose
-# only dependency is snafu -- no C-binding crates, no GUI/OS-integration
-# surface. Still, watch full-gate-build actually pass on the adoption PR
-# before trusting these fleet defaults are correct for this repo.
+# NOTE: this is not the only compile of the workspace. ci.yml runs fmt,
+# check, clippy, nextest, doctests, rustdoc (-D warnings), and the
+# docs-drift guard on every PR and push to main; security.yml runs
+# cargo-deny, cargo-audit, and osv-scanner; codeql.yml runs CodeQL. The
+# workspace crates (heurema, atmis, thesauros) depend only on pure-Rust
+# crates (snafu, serde, serde_json, fjall) -- no C bindings, no
+# GUI/OS-integration surface.
 #
 # NOTE: rust-toolchain.toml pins `channel = "stable"` -- auto-detect
 # applies, no rust_toolchain override. No `git =
 # "https://github.com/forkwright/..."` dependency in the root or
-# crates/heurema Cargo.toml (grepped directly) -- needs_fleet_repo_token
-# stays false. No ci.yml means no double-build-cost concern here (nothing
-# else compiles this workspace unconditionally today).
+# any workspace Cargo.toml (grepped directly) -- needs_fleet_repo_token
+# stays false. full-gate-build duplicates ci.yml's compile on trailer-less
+# PRs and every push to main; that cost is accepted so the gate attests the
+# build itself.
 name: Gate Attestation
 
 on:
@@ -42,8 +39,8 @@ on:
   # carry the source commits' trailers, so no commit on main has a
   # Gate-Passed trailer -- check-trailer finds none and routes to
   # full-gate-build, which is the job that actually compiles the workspace.
-  # Without this nothing ever builds main, and the first PR to inherit a
-  # merged break is what discovers it (forkwright/theatron#235).
+  # Without this the gate never attests main; forkwright/theatron#235 is the
+  # merged break that went unnoticed until a later PR inherited it.
   push:
     branches: [main]
 
@@ -68,12 +65,11 @@ jobs:
       check_cmd: "cargo check --workspace --all-targets"
       clippy_cmd: "cargo clippy --workspace --all-targets -- -D warnings"
       nextest_cmd: "cargo nextest run --workspace"
-      # UNVERIFIED: no ci.yml exists to confirm whether heurema intends
-      # doctest coverage. Left at skip (fleet default) rather than invented.
+      # NOTE: ci.yml runs doctests (`cargo test --workspace --doc`), so the
+      # gate leaves them at the fleet-default skip rather than run them twice.
       doctest_cmd: ""
-      # WHY empty: heurema's only dependency (workspace-wide) is snafu --
-      # pure Rust, no system packages plausible. Verified against
-      # crates/heurema/Cargo.toml directly.
+      # WHY empty: the workspace dependencies (snafu, serde, serde_json,
+      # fjall) are pure Rust -- no system packages needed.
       system_packages: ""
       needs_fleet_repo_token: false
       rust_cache_key: "gate-attestation"

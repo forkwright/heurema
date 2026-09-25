@@ -16,4 +16,4 @@ Structured LLM corpus:
 - [CLAUDE.md](CLAUDE.md): repo conventions for AI coding agents
 - [AGENTS.md](AGENTS.md): onboarding + dispatch conventions
 - [crates/heurema/src/lib.rs](crates/heurema/src/lib.rs): public API root
-- [kanon/projects/heurema/](https://github.com/forkwright/kanon/tree/main/projects/heurema): canonical planning (STATE / ROADMAP / vision / design)
+- Canonical planning (state, roadmap, vision, phase plans) lives in the fleet's private planning repository; [CLAUDE.md](CLAUDE.md)'s Roadmap summarises the phases

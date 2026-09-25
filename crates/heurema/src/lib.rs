@@ -7,16 +7,17 @@
 //! agnostic of any consumer-specific language surface — pinax owns SQL.
 //!
 //! Datalog is not a separate repo's concern: heurēma owns that engine as
-//! `akolouthia`, in this workspace, because separating an engine from the
-//! indexes it queries puts a cross-repo seam on the hottest path. `mneme` is
+//! `akolouthia`, planned for this workspace and not yet built, because
+//! separating an engine from the indexes it queries puts a cross-repo seam on
+//! the hottest path. `mneme` is
 //! the memory policy layer above heurēma, not a second engine.
 
 #![deny(missing_docs)]
 
 mod error;
 
-/// WHY: Full-text search needs a shared trait boundary before Phase 2 writes
-/// BM25 fresh here.
+/// WHY: Full-text search needs one shared trait boundary; `Bm25Index` is
+/// heurēma's fresh BM25 implementation of it.
 pub mod fts;
 /// WHY: HNSW vector search needs one fleet implementation and one correctness
 /// proof instead of per-consumer graph implementations.

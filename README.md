@@ -2,9 +2,25 @@
 
 *εὕρημα - a finding, a discovery. Root of "eureka." Search indices are the means by which a system finds what it didn't know it was holding.*
 
-Shared full-text (BM25), rank-fusion, and persistence-adapter primitives for the fleet, with HNSW remaining a committed trait surface pending its fresh graph implementation.
+Shared vector (HNSW), full-text (BM25), rank-fusion, and persistence-adapter primitives for the fleet.
 
 ## What's real
+
+`HnswIndex` (`crates/heurema/src/hnsw/engine.rs`) is a safe, deterministic, in-memory HNSW graph that
+implements `VectorIndex`. It persists its level-assignment state, bounds greedy and best-first
+traversal, keeps reciprocal links plus a base-layer backbone cycle that degree pruning cannot remove,
+repairs connectivity on replacement and removal, and validates dimensions, finite components,
+configuration, and snapshot graph invariants. It landed in PR #50 (fresh navigable HNSW graph) and
+meets the pinned brute-force recall floor in `crates/heurema/tests/oracle/hnsw.rs`.
+
+`Bm25Index` (`crates/heurema/src/fts/bm25.rs`) is an in-memory BM25 engine that implements `FtsIndex`
+for the `Simple` pipeline (`FtsConfig::simple()`): insert, replacement, removal, corpus statistics, and
+ranked scores with stable ties. It landed in PR #48 (fresh Simple-pipeline BM25). Any other tokenizer
+or filter pipeline returns `HeuremaError::NotYetImplemented` before it mutates state.
+
+Both engines were written fresh in this repository; CLAUDE.md's Roadmap records the ruling. The
+conformance oracle in `crates/heurema/tests/oracle/` runs every BM25 and HNSW case live; none is
+ignored.
 
 `rrf` / `rrf_with_default` (reciprocal-rank fusion, `crates/heurema/src/rrf.rs`) is a complete,
 tested implementation: `f64` accumulation narrowed to a public `f32` score, a documented total-order
@@ -15,65 +31,62 @@ by `crates/heurema/tests/rrf_correctness.rs` and `index_rrf_composition.rs`.
 `PersistenceBackend` (`crates/heurema/src/persistence.rs`) ships two implementations. `atmis`'s
 `AtmisBackend` keeps snapshots in a `HashMap<String, Vec<u8>>` behind an `RwLock` and never touches
 disk; every test in this repo can run against it without filesystem I/O. `thesauros`'s
-`ThesaurosBackend` opens a fjall keyspace, splits vector and FTS snapshots into separate partitions, and
+`ThesaurosBackend` opens a fjall database, keeps vector and FTS snapshots in separate keyspaces, and
 fsyncs (`fjall::PersistMode::SyncAll`) after every write, so a save that returns `Ok` is durable before
-the caller observes it. Both encode through `serde_json`, so a caller-chosen index type needs
+the caller observes it. Both wrap each index in a versioned `SnapshotEnvelope` (format version plus
+`SnapshotFamily`), encode it through `serde_json`, and load through `decode_snapshot_payload`, which
+refuses an unsupported version or the wrong family with `HeuremaError::SnapshotFormat` before the
+index's own decoder runs (PR #51, versioned individual snapshots). A caller-chosen index type needs
 `Serialize` on save and `DeserializeOwned` on load; see `persistence.rs` for why the trait carries that
 bound. Neither crate is named `heurema-*`: see the `WHY` comment on the workspace `Cargo.toml`
 `[workspace.dependencies]` block for why (`NAMING.md` forbids that shape; both are independent GNOMON
 coinages instead).
 
-## What's a stub
+A snapshot is a whole-index save of one index, not a transaction: nothing here makes two indexes, or an
+index and the records it was built from, become visible together.
 
-`HnswIndex` (`src/hnsw/stub.rs`) remains a concrete type that satisfies `VectorIndex` while its fresh graph implementation is pending. Its mutation and query methods return `HeuremaError::NotYetImplemented`. `Bm25Index` is a real, in-memory BM25 engine for `FtsConfig::simple()`; named tokenizer/filter pipelines remain explicitly unsupported until their semantics are implemented.
+## Status
 
-This is deliberate, not drift: the trait surface *is* the design. Committing the API now lets `pinax`
-and `mneme` build against the shape before the engines exist.
-
-The engines will be **written fresh**, not extracted. aletheia's `krites` carries working HNSW and BM25,
-but that code is vendored CozoDB under MPL-2.0, so moving it would relocate a provenance question, not
-resolve one. `krites` instead is a behavioural reference, and its tests are a conformance oracle: the
-same opportunity to fix what the vendored implementation got wrong.
-
-Heurēma provides BM25 full-text search for the Simple pipeline. HNSW remains unavailable until its graph implementation lands.
+Phase 01 landed both fresh engines; its one open exit item is an independently written BM25 formula
+reference checked against `Bm25Index`. Phase 02, the durable retrieval lifecycle (named indexes, staged
+writes, one atomic publish point, recovery, and deletion rules), follows; the Datalog engine
+`akolouthia` comes after it. CLAUDE.md's Roadmap carries the phase list.
 
 ## API surface
 
 ```rust
 use heurema::{
-    Bm25Index, FtsConfig, FtsIndex,
-    HnswConfig, HnswIndex, VectorIndex,
-    PersistenceBackend,
+    Bm25Index, FtsConfig, FtsIndex, TokenizerConfig,
+    HnswConfig, HnswIndex, VectorDistance, VectorIndex,
+    PersistenceBackend, SnapshotEnvelope, SnapshotFamily, SNAPSHOT_FORMAT_VERSION,
+    decode_snapshot_payload,
     rrf, rrf_with_default, DEFAULT_RRF_K_CONSTANT,
+    HeuremaError,
 };
 use atmis::AtmisBackend;
 use thesauros::ThesaurosBackend;
 ```
 
-- `VectorIndex` - insert / query / remove for ID-keyed vectors, plus `len` / `is_empty`. Trait is real; `HnswIndex` is a stub.
-- `FtsIndex` - insert / query / remove for ID-keyed documents, with BM25-style scores. `Bm25Index` implements the Simple pipeline.
-- `PersistenceBackend` - save / load named vector and FTS indexes; backend-agnostic. Trait is real; `atmis`'s `AtmisBackend` and `thesauros`'s `ThesaurosBackend` both implement it.
-- `rrf` / `rrf_with_default` - reciprocal-rank fusion with the paper-standard `k = 60`. Implemented and tested.
+- `VectorIndex` - insert / query / remove for ID-keyed vectors, plus `len` / `is_empty`. `HnswIndex` implements it as an in-memory HNSW graph.
+- `FtsIndex` - insert / query / remove for ID-keyed documents, with BM25-style scores. `Bm25Index` implements the `Simple` pipeline.
+- `PersistenceBackend` - save / load named vector and FTS indexes; backend-agnostic. `atmis`'s `AtmisBackend` and `thesauros`'s `ThesaurosBackend` both implement it.
+- `SnapshotEnvelope` / `SnapshotFamily` / `decode_snapshot_payload` - the versioned per-index snapshot format both adapters share.
+- `rrf` / `rrf_with_default` - reciprocal-rank fusion with the paper-standard `k = 60`.
 
-The API is deliberately engine-agnostic. Heurēma knows nothing about SQL, Datalog, or any consumer-owned query language; it provides the index contracts those engines wrap.
+The index API is engine-agnostic: heurēma knows nothing about SQL or any consumer-owned query language,
+and it returns IDs and scores rather than consumer tuples.
 
 ## Non-goals
 
 Heurēma is not a vector database, embedding-model host, or distributed search layer. Embedding models live in `logismos`; SQL routing lives in `pinax`.
 
-Datalog is the exception, and it is deliberate: heurēma owns the Datalog engine as `akolouthia`. Splitting the engine from the indexes it queries would put a cross-repo seam on the hottest path in the fleet, so the engine and the index contracts live in one workspace behind one facade, adapted per consumer by configuration. The `mneme` repo is the memory *policy* layer - factor sets, admission, lifecycle rules - sitting over heurēma, not a second engine.
+Datalog is the exception, and it is deliberate: heurēma owns the fleet's Datalog engine, `akolouthia`, planned for this workspace (no crate exists yet). Splitting the engine from the indexes it queries would put a cross-repo seam on the hottest path in the fleet, so the engine and the index contracts belong in one workspace behind one facade. The `mneme` repo is the memory *policy* layer - factor sets, admission, lifecycle rules - sitting over heurēma, not a second engine.
 
 ## License
 
-MPL-2.0. See [LICENSE](LICENSE).
+Apache-2.0 OR MIT, at your option. See [LICENSE](LICENSE).
 
-The choice is load-bearing, because heurēma has to be consumable from both sides of the fleet at once.
-`aletheia` is AGPL-3.0-or-later, and MPL §1.12 makes that a Secondary License, so §3.3 lets it consume
-heurēma directly. `kanon`, `logismos` and `daimon` are PolyForm Shield, which cannot grant AGPL's §5(c)
-and §13 terms - under an AGPL heurēma they could not have been consumers at all. MPL's file-level
-copyleft reaches those repos without that conflict.
-
-Two consequences worth stating so they are not undone by a later tidy-up. Exhibit B is deliberately not
-attached to any file here; attaching it would make heurēma Incompatible With Secondary Licenses and cut
-off aletheia. And `deny.toml` does not allow AGPL dependencies, since taking one would propagate terms
-the Shield consumers cannot accept.
+heurēma is a library other fleet repositories depend on, so it carries the fleet's interop license
+posture (PR #28, one license declaration rendered per repository): a permissive dual license that every
+consumer can take whatever its own license is. `deny.toml` does not allow AGPL dependencies, since
+taking one would propagate its terms to every consumer.

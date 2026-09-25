@@ -23,7 +23,7 @@ Include: description, reproduction steps, potential impact, affected version or 
 
 **In scope:**
 
-- Memory-safety or unsoundness in HNSW / BM25 implementations (Phase 2 onward).
+- Memory-safety or unsoundness in the HNSW (`crates/heurema/src/hnsw/engine.rs`) and BM25 (`crates/heurema/src/fts/bm25.rs`) implementations, including snapshot decoding.
 - Persistence-backend trust boundary issues — index files crafted to mislead `PersistenceBackend::load_*`.
 - Dependency-chain advisories that become exploitable through heurēma's surface.
 
@@ -41,12 +41,12 @@ After a fix ships, we publish a GitHub Security Advisory when warranted, with af
 | Version | Supported |
 |---------|-----------|
 | Latest minor (`0.x`) | Yes |
-| Older `0.x` minors | Best effort during Phase 1; no guarantees pre-1.0 |
+| Older `0.x` minors | Best effort; no guarantees pre-1.0 |
 
 ## Security Standards
 
 heurēma follows the fleet security standards maintained in `crates/basanos/standards/SECURITY.md` in `forkwright/kanon`. In particular:
 
-- `unsafe_code = "forbid"` workspace-wide. Phase 2's fresh HNSW implementation must stay safe Rust.
+- `unsafe_code = "forbid"` workspace-wide. The HNSW and BM25 engines are safe Rust, and the lint keeps them that way.
 - No silent truncation: no `as` for numeric conversions in production code paths.
 - Backend errors are type-erased only at the `PersistenceSource` boundary, so the error chain stays walkable.

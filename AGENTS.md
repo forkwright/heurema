@@ -8,11 +8,11 @@ tightens: phase-specific dispatch prompts may override defaults with justificati
 
 ## Purpose
 
-heurēma is a fleet substrate providing HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion primitives: the `heurema` trait + RRF crate plus its `thesauros` (durable) and `atmis` (in-memory) `PersistenceBackend` sibling crates. Consumed externally by `pinax` for SQL and by `mneme`, the memory-*policy* layer (admission, retention, lifecycle rules) built over heurēma's own Datalog engine, `akolouthia` — mneme is not a second engine (see README.md's Non-goals) — and by aletheia's `krites` memory stack (per ADR-003: aletheia's memory stack stays internal but is free to adopt heurēma when it chooses).
+heurēma is a fleet substrate providing HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion primitives: the `heurema` crate (traits, the HNSW and BM25 engines, RRF, the snapshot envelope) plus its `thesauros` (durable) and `atmis` (in-memory) `PersistenceBackend` sibling crates. Its intended consumers are `pinax` for SQL and `mneme`, the memory-*policy* layer (admission, retention, lifecycle rules) over heurēma's own Datalog engine, `akolouthia`, which is planned for this workspace and not yet built — mneme is not a second engine (see README.md's Non-goals) — and aletheia, whose `krites` engines retire as their callers repoint at heurēma.
 
 Agents working here:
 
-- work Phase 2 HNSW and BM25 written fresh, per `CLAUDE.md`'s Roadmap section — `krites` is behavioural reference and conformance oracle only, permanently, never a code source;
+- maintain the fresh HNSW (`src/hnsw/engine.rs`) and BM25 (`src/fts/bm25.rs`) engines and build the Phase 02 durable retrieval lifecycle, per `CLAUDE.md`'s Roadmap section — `krites` is behavioural reference and conformance oracle only, permanently, never a code source;
 - maintain the `thesauros` / `atmis` `PersistenceBackend` adapters;
 - fix CI / lint / gate failures;
 - maintain the trait surface against consumer drift.
@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-No system dependencies. Pure-Rust crate. Headless CI compatible.
+No system dependencies. Pure-Rust workspace (`heurema`, `atmis`, `thesauros`). Headless CI compatible. `scripts/docs-drift.sh` runs the cited-path and stub-wording checks locally.
 
 ## Standards
 
@@ -35,14 +35,14 @@ Local CLAUDE.md narrows the standards to repo-specific patterns; read it before 
 
 ## Gate trailer
 
-Every PR commit carries `Gate-Passed: <sha>+<iso-8601-timestamp>` (or the legacy `Gate-Passed: kanon X.Y.Z` form for version-form evidence). The `gate-attestation` workflow blocks merges without it.
+`Gate-Passed` is advisory fleet-wide. `kanon gate --stamp` writes it as provenance; never hand-write it. Merges are gated by this repository's required GitHub checks, and a PR without the trailer gets the full `gate-attestation` build.
 
 ## Cross-repo touchpoints
 
 | Repo | Surface | Direction |
 |------|---------|-----------|
-| `kanon/projects/heurema/` | planning artifacts (STATE.md, ROADMAP.md, vision.md, design.md) | heurēma reads; updates happen there |
+| fleet private planning repository | planning artifacts (state, roadmap, vision, phase plans) | heurēma reads; updates happen there |
 | `kanon/crates/basanos/standards/` | universal standards | heurēma reads; never edits from here |
-| `aletheia/crates/krites/` | Phase 2 behavioural reference + conformance oracle, permanently — never a code source (see `CLAUDE.md`'s Roadmap section) | heurēma reads; aletheia owns the original |
+| `aletheia/crates/krites/` | behavioural reference + conformance oracle, permanently — never a code source (see `CLAUDE.md`'s Roadmap section) | heurēma reads; aletheia owns the original |
 
-Any change that touches the public API surface must also update kanon's `projects/heurema/STATE.md` and any consumer's pinned version.
+Any change that touches the public API surface must also update the planning repository's heurēma state record and any consumer's pinned version.

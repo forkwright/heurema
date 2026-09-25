@@ -1,4 +1,4 @@
-//! HNSW vector index contract and Phase 1 stub type.
+//! HNSW vector index contract and implementation.
 
 use std::hash::Hash;
 
@@ -60,7 +60,9 @@ pub struct HnswConfig {
 
 impl HnswConfig {
     /// WHY: Consumers need a minimal config constructor that preserves krites's
-    /// current defaults for early API smoke tests.
+    /// defaults (`VectorDistance::L2` and the module's default
+    /// `ef_construction` / `m_neighbours` constants); `HnswIndex` validates
+    /// the result at its mutation and snapshot boundary.
     #[must_use]
     pub const fn new(dimensions: usize) -> Self {
         Self {
@@ -77,7 +79,7 @@ impl HnswConfig {
 pub trait VectorIndex {
     /// Identifier stored alongside each vector.
     ///
-    /// WHY: `Ord` is the bound [`crate::rrf`] fuses under. Requiring it here
+    /// WHY: `Ord` is the bound [`crate::rrf()`] fuses under. Requiring it here
     /// keeps the advertised hybrid path — query an index, fuse the result —
     /// compilable for a generic consumer that knows only this trait.
     type Id: Ord + Hash + Clone;
@@ -96,7 +98,7 @@ pub trait VectorIndex {
     /// distances without receiving engine-owned tuples.
     ///
     /// Ranking contract — implementations must satisfy all of it, because
-    /// [`crate::rrf`] reads *position* as the authoritative rank and ignores
+    /// [`crate::rrf()`] reads *position* as the authoritative rank and ignores
     /// the returned score entirely:
     ///
     /// - **Ordering is normative.** Element 0 is the best match, and each

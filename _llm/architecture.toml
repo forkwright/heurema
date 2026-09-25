@@ -5,15 +5,11 @@ generated = false
 source_docs = [
   "README.md",
   "CLAUDE.md",
-  "kanon/projects/heurema/STATE.md",
-  "kanon/projects/heurema/ROADMAP.md",
-  "kanon/projects/heurema/vision.md",
-  "kanon/projects/heurema/design.md",
   "Cargo.toml",
 ]
 
 [architecture]
-summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. Three crates: the trait + RRF crate, and two PersistenceBackend adapter siblings (atmis, thesauros) under the same workspace."
+summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. The workspace holds the traits-and-engines crate (heurema: HNSW, BM25, RRF, snapshot envelope) and its PersistenceBackend adapter siblings (atmis, thesauros)."
 layers = [
   "public-api",
   "errors",
@@ -27,35 +23,59 @@ layers = [
 [[architecture.crates]]
 name = "heurema"
 path = "crates/heurema"
-role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), Phase 1 typed stubs for HNSW + BM25, real reciprocal-rank-fusion implementation, and the workspace error chain."
+role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), and the workspace error chain."
 
 [[architecture.crates]]
 name = "atmis"
 path = "crates/atmis"
-role = "In-memory PersistenceBackend adapter: HashMap<String, Vec<u8>> snapshots behind an RwLock, encoded with serde_json. No disk I/O; the default backend for tests."
+role = "In-memory PersistenceBackend adapter: HashMap<String, Vec<u8>> snapshots behind an RwLock, each a versioned SnapshotEnvelope encoded with serde_json. No disk I/O; the default backend for tests."
 
 [[architecture.crates]]
 name = "thesauros"
 path = "crates/thesauros"
-role = "Durable PersistenceBackend adapter: an fjall keyspace with separate vector_indexes/fts_indexes partitions, encoded with serde_json, fsyncing (PersistMode::SyncAll) after every write."
+role = "Durable PersistenceBackend adapter: a fjall database with separate vector_indexes/fts_indexes keyspaces, each snapshot a versioned SnapshotEnvelope encoded with serde_json, fsyncing (PersistMode::SyncAll) after every write."
 
 [[interfaces]]
 crate = "heurema"
 kind = "trait"
 name = "VectorIndex"
-purpose = "Insert / query / remove / cardinality for ID-keyed vectors. Used by HNSW implementations."
+purpose = "Insert / query / remove / cardinality for ID-keyed vectors, with a normative ascending-distance ranking contract. Implemented by HnswIndex."
 
 [[interfaces]]
 crate = "heurema"
 kind = "trait"
 name = "FtsIndex"
-purpose = "Insert / query / remove / cardinality for ID-keyed documents. Used by BM25 implementations."
+purpose = "Insert / query / remove / cardinality for ID-keyed documents, with a normative descending-relevance ranking contract. Implemented by Bm25Index."
 
 [[interfaces]]
 crate = "heurema"
 kind = "trait"
 name = "PersistenceBackend"
 purpose = "Save / load named vector and FTS indexes; backend-agnostic so consumers can choose fjall, in-memory, or engine-owned storage."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "HnswIndex"
+purpose = "Safe, deterministic, in-memory HNSW graph implementing VectorIndex; validates dimensions, finite components, configuration, and snapshot graph invariants."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "Bm25Index"
+purpose = "In-memory BM25 engine implementing FtsIndex for the Simple pipeline; other analyzer pipelines return HeuremaError::NotYetImplemented before mutating state."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "SnapshotEnvelope"
+purpose = "Versioned wrapper (format version + SnapshotFamily) around one index's snapshot payload; the shared on-disk and in-memory format of both adapters."
+
+[[interfaces]]
+crate = "heurema"
+kind = "function"
+name = "decode_snapshot_payload"
+purpose = "Decode one adapter snapshot after refusing an unsupported format version or wrong SnapshotFamily, before the concrete index decoder sees the payload."
 
 [[interfaces]]
 crate = "heurema"

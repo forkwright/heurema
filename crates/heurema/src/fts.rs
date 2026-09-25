@@ -25,13 +25,15 @@ pub use bm25::Bm25Index;
 pub struct TokenizerConfig {
     /// Tokenizer or filter name, such as `Simple`, `NGram`, or `Stemmer`.
     pub name: String,
-    /// String-encoded arguments owned by the eventual backend adapter.
+    /// String-encoded arguments. Their value model is undecided;
+    /// `Bm25Index` implements only the argument-less `Simple` tokenizer.
     pub args: Vec<String>,
 }
 
 impl TokenizerConfig {
-    /// WHY: Consumers need a small constructor for analyzer pipelines while
-    /// Phase 2's fresh implementation decides the final argument value model.
+    /// WHY: Consumers need a small constructor for analyzer pipelines. The
+    /// argument value model is undecided; only argument-less `Simple` is
+    /// implemented.
     #[must_use]
     pub fn new(name: impl Into<String>, args: Vec<String>) -> Self {
         Self {
@@ -62,8 +64,8 @@ pub struct FtsConfig {
 }
 
 impl FtsConfig {
-    /// WHY: `Simple` is the krites default tokenizer used by basic FTS index
-    /// smoke paths.
+    /// WHY: `Simple` is the krites default tokenizer and the only analyzer
+    /// pipeline `Bm25Index` implements.
     #[must_use]
     pub fn simple() -> Self {
         Self {
@@ -78,7 +80,7 @@ impl FtsConfig {
 pub trait FtsIndex {
     /// Identifier stored alongside each indexed document.
     ///
-    /// WHY: `Ord` is the bound [`crate::rrf`] fuses under. Requiring it here
+    /// WHY: `Ord` is the bound [`crate::rrf()`] fuses under. Requiring it here
     /// keeps the advertised hybrid path — query an index, fuse the result —
     /// compilable for a generic consumer that knows only this trait.
     type Id: Ord + Hash + Clone;
@@ -91,7 +93,7 @@ pub trait FtsIndex {
     /// BM25-style scores without receiving engine-owned tuples.
     ///
     /// Ranking contract — implementations must satisfy all of it, because
-    /// [`crate::rrf`] reads *position* as the authoritative rank and ignores
+    /// [`crate::rrf()`] reads *position* as the authoritative rank and ignores
     /// the returned score entirely:
     ///
     /// - **Ordering is normative.** Element 0 is the best match, and each

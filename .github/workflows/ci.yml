@@ -86,6 +86,26 @@ jobs:
         # WHY: nextest does not execute doctests.
         run: cargo test --workspace --doc
 
+  rustdoc:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Build docs with warnings denied
+        # WHY: rustdoc warnings, broken intra-doc links included, do not fail
+        # a plain `cargo doc`; ambiguous `crate::rrf` links (function vs
+        # module) sat on main unnoticed until this job existed.
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --no-deps
+
   docs-drift:
     name: Docs drift (krites extraction)
     runs-on: ubuntu-latest
@@ -96,7 +116,7 @@ jobs:
           persist-credentials: false
       - name: No stale krites-extraction framing
         # WHY: heurema#21's own Done-when names this exact pattern as the acceptance
-        # test for "Phase 2 is write-fresh, permanently" (locked in
+        # test for "the engines are written fresh, permanently" (locked in
         # _llm/decisions.toml's `heurema-phase-2-source-settled` entry). Two prior
         # sweeps (#18, #19, #22) each fixed a subset of surfaces and missed others,
         # so the check is codified rather than re-asserted by hand each time.
@@ -106,8 +126,14 @@ jobs:
         run: |
           if grep -rniE 'extract.*(hnsw|bm25|fts).*krites' --exclude-dir=.git --exclude-dir=.github .; then
             echo "::error::Stale krites-extraction framing found (heurema#21 regression)." >&2
-            echo "::error::Phase 2 is write-fresh, permanently — krites is behavioural" >&2
+            echo "::error::The engines are written fresh, permanently — krites is behavioural" >&2
             echo "::error::reference + conformance oracle only. See CLAUDE.md's Roadmap" >&2
             echo "::error::entry and _llm/decisions.toml's heurema-phase-2-source-settled." >&2
             exit 1
           fi
+      - name: Cited paths resolve; no stub-era engine-state wording
+        # WHY: engine-state drift outlived both engine landings (#48, #50):
+        # docs kept citing a deleted stub file and describing the engines as
+        # pending, and the grep above could not see it. The script checks the
+        # class rather than one phrasing; see its header for both rules.
+        run: scripts/docs-drift.sh

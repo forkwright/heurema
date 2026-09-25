@@ -29,14 +29,16 @@ thesauros = { version = "0.2.0", path = "crates/thesauros" }
 atmis = { version = "0.2.0", path = "crates/atmis" }
 
 # WHY: snafu is the fleet-wide error library per kanon RUST.md. Pinned at the
-# workspace root so the single heurema crate inherits via `workspace = true`,
-# matching the inheritance pattern adapter sub-crates will use later.
+# workspace root so heurema, atmis, and thesauros all inherit it via
+# `workspace = true`.
 snafu = "0.9"
 
 # WHY: heurema's PersistenceBackend bound (crates/heurema/src/persistence.rs)
 # needs Serialize on save and DeserializeOwned on load, so heurema itself
-# depends on serde; the adapter crates add serde_json (atmis, thesauros) to
-# turn that into snapshot bytes. fjall is thesauros's storage engine.
+# depends on serde, plus serde_json for the one snapshot-envelope header
+# parser both adapters share; the adapter crates (atmis, thesauros) use
+# serde_json to turn indexes into snapshot bytes. fjall is thesauros's
+# storage engine.
 # NOTE: kanon's archeion crate still pins fjall 2 (workspace root
 # `fjall = "2"`) — this bump is no longer at the "same major version"
 # fleet-wide; the two now diverge until archeion moves too.
