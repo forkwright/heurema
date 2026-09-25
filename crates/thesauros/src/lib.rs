@@ -46,13 +46,16 @@
 //!
 //! # Limits
 //!
-//! fjall stores values of at most 4294967295 bytes (4 GiB). A lifecycle
-//! write whose value (a version payload, which holds one index's whole
-//! engine and member table as JSON, a staging marker, a head, or an
-//! operation record) is larger is refused with
-//! [`HeuremaError::Persistence`] before anything is written. Keys need no
-//! such check: the identifier limits bound every key far below fjall's key
-//! limit.
+//! fjall stores values of at most `u32::MAX` bytes (4294967295, 4 GiB less
+//! one byte). A lifecycle write whose value (a version payload, which holds
+//! one index's whole engine and member table as JSON, a staging marker, a
+//! head, or an operation record, which lists every member its operation
+//! changed) is larger is refused with [`HeuremaError::Persistence`] before
+//! anything is written. A stage also refuses when the head or operation
+//! record its publish will write ([`StageWrite::head_len`],
+//! [`StageWrite::operation_len`]) is larger, so a publish is never refused
+//! for size after its stage left staged state behind. Keys need no such
+//! check: the identifier limits bound every key far below fjall's key limit.
 
 #![deny(missing_docs)]
 
@@ -532,6 +535,10 @@ impl LifecycleBackend for ThesaurosBackend {
         let operation_key = storage_key::operation(write.index, write.key);
         self.refuse_oversized("a version payload", write.payload.len())?;
         self.refuse_oversized("a staging marker", write.marker.len())?;
+        // WHY: the publish of this stage writes these; refusing them there
+        // would leave this stage's version behind as orphan staged state.
+        self.refuse_oversized("a head record", write.head_len)?;
+        self.refuse_oversized("an operation record", write.operation_len)?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -833,7 +840,12 @@ impl std::error::Error for UnpairedQuarantineEntry {}
 #[expect(clippy::expect_used, reason = "tests need concise fixture setup")]
 mod tests {
     use super::*;
-    use heurema::{IndexName, OwnerNamespace};
+    use heurema::{
+        HnswConfig, IndexChange, IndexConfig, IndexLifecycle, IndexMember, IndexName,
+        LifecycleOperation, MemberContent, MemberIdentity, OwnerNamespace, ProvenanceReference,
+        RetentionReference,
+    };
+    use serde::{Deserialize, Serialize};
 
     #[test]
     fn poisoned_commit_lock_refuses_every_lifecycle_write_but_not_reads() {
@@ -850,7 +862,7 @@ mod tests {
         // meet another refusal; only the lock makes each one `poisoned`.
         backend
             .stage(StageWrite::new(
-                &index, v1, &key, None, b"marker", b"payload",
+                &index, v1, &key, None, b"marker", b"payload", 0, 0,
             ))
             .expect("stage before the panic");
 
@@ -868,7 +880,7 @@ mod tests {
             (
                 "stage",
                 backend.stage(StageWrite::new(
-                    &index, v1, &key, None, b"marker", b"payload",
+                    &index, v1, &key, None, b"marker", b"payload", 0, 0,
                 )),
             ),
             (
@@ -961,6 +973,35 @@ mod tests {
         observed
     }
 
+    /// Stages version 1 of `staged` and publishes version 1 of `published`,
+    /// with every value `fits`.
+    fn stage_and_publish(
+        backend: &ThesaurosBackend,
+        staged: &IndexIdentity,
+        published: &IndexIdentity,
+        fits: &[u8],
+    ) {
+        let v1 = IndexVersion::FIRST;
+        let key = |text: &str| OperationKey::try_from(text).expect("key");
+        for (index, text) in [(staged, "s"), (published, "p")] {
+            let (key, len) = (key(text), fits.len());
+            backend
+                .stage(StageWrite::new(index, v1, &key, None, fits, fits, len, len))
+                .expect("stage");
+        }
+        backend
+            .publish(PublishWrite::new(
+                published,
+                v1,
+                &key("p"),
+                None,
+                fits,
+                fits,
+                fits,
+            ))
+            .expect("publish");
+    }
+
     #[test]
     fn every_lifecycle_write_refuses_an_oversized_value_before_writing() {
         const LIMIT: usize = 8;
@@ -981,29 +1022,14 @@ mod tests {
         let v1 = IndexVersion::FIRST;
         let fits = b"fits";
         let oversized = [b'x'; LIMIT + 1];
-        backend
-            .stage(StageWrite::new(&staged, v1, &key("s"), None, fits, fits))
-            .expect("stage");
-        backend
-            .stage(StageWrite::new(&published, v1, &key("p"), None, fits, fits))
-            .expect("stage");
-        backend
-            .publish(PublishWrite::new(
-                &published,
-                v1,
-                &key("p"),
-                None,
-                fits,
-                fits,
-                fits,
-            ))
-            .expect("publish");
+        let small = fits.len();
+        stage_and_publish(&backend, &staged, &published, fits);
         let before = observed(&backend, &[&staged, &published, &fresh]);
 
         // NOTE: each write is valid but for its one oversized value, so a
         // write that skipped its size check would succeed or meet another
         // refusal, never this one.
-        let stage = |marker: &[u8], payload: &[u8]| {
+        let stage = |marker: &[u8], payload: &[u8], head_len: usize, operation_len: usize| {
             backend.stage(StageWrite::new(
                 &fresh,
                 v1,
@@ -1011,6 +1037,8 @@ mod tests {
                 None,
                 marker,
                 payload,
+                head_len,
+                operation_len,
             ))
         };
         let publish = |head: &[u8], operation: &[u8]| {
@@ -1035,8 +1063,15 @@ mod tests {
             ))
         };
         let writes = [
-            ("a version payload", stage(fits, &oversized)),
-            ("a staging marker", stage(&oversized, fits)),
+            ("a version payload", stage(fits, &oversized, small, small)),
+            ("a staging marker", stage(&oversized, fits, small, small)),
+            // NOTE: the head and operation record the stage's publish would
+            // write, refused while nothing is staged.
+            ("a head record", stage(fits, fits, oversized.len(), small)),
+            (
+                "an operation record",
+                stage(fits, fits, small, oversized.len()),
+            ),
             ("a head record", publish(&oversized, fits)),
             ("an operation record", publish(fits, &oversized)),
             ("a head record", destroy(&oversized, fits)),
@@ -1067,5 +1102,117 @@ mod tests {
             before,
             "the refused writes changed nothing"
         );
+    }
+
+    /// test-local placeholder; heurēma defines no provenance shape
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    struct TestMember(u64);
+
+    impl MemberIdentity for TestMember {}
+
+    /// test-local placeholder; heurēma defines no provenance shape
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct PlaceholderProvenance(u32);
+
+    impl ProvenanceReference for PlaceholderProvenance {}
+
+    /// test-local placeholder; heurēma defines no provenance shape
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct PlaceholderRetention(u32);
+
+    impl RetentionReference for PlaceholderRetention {}
+
+    type Lifecycle<'a> = IndexLifecycle<
+        &'a ThesaurosBackend,
+        TestMember,
+        PlaceholderProvenance,
+        PlaceholderRetention,
+    >;
+    type Operation = LifecycleOperation<TestMember, PlaceholderProvenance, PlaceholderRetention>;
+
+    fn operation(
+        index: &IndexIdentity,
+        key: &str,
+        change: IndexChange<TestMember, PlaceholderProvenance, PlaceholderRetention>,
+    ) -> Operation {
+        LifecycleOperation::new(
+            index.clone(),
+            OperationKey::try_from(key).expect("key"),
+            change,
+        )
+    }
+
+    fn insert(index: &IndexIdentity, key: &str, id: u64) -> Operation {
+        let member = IndexMember::new(
+            TestMember(id),
+            PlaceholderProvenance(7),
+            MemberContent::Vector(vec![1.0, 0.0]),
+        );
+        operation(
+            index,
+            key,
+            IndexChange::Insert {
+                members: vec![member],
+            },
+        )
+    }
+
+    /// WHY a unit test: the conformance suite runs on both adapters, but
+    /// only here can the value limit be lowered, and `atmis` has none.
+    #[test]
+    fn a_lifecycle_refuses_an_operation_record_too_large_to_publish_before_it_stages() {
+        const LIMIT: usize = 4096;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut backend = ThesaurosBackend::open(dir.path()).expect("open");
+        backend.value_limit = LIMIT;
+        let lifecycle = Lifecycle::open(&backend).expect("open lifecycle");
+        let notes = IndexIdentity::new(
+            OwnerNamespace::try_from("example").expect("namespace"),
+            IndexName::try_from("notes").expect("name"),
+        );
+        let create = IndexChange::Create {
+            config: IndexConfig::Vector(HnswConfig::new(2)),
+        };
+        lifecycle
+            .apply(operation(&notes, "create", create))
+            .expect("create");
+        lifecycle
+            .apply(insert(&notes, "insert-1", 1))
+            .expect("insert");
+        let head = backend.read_head(&notes).expect("head");
+
+        // NOTE: a Remove records every absent member it names, so this
+        // record outgrows the limit while the version it would publish, one
+        // member as before, stays far under it.
+        let absent = IndexChange::Remove {
+            members: (100..500).map(TestMember).collect(),
+        };
+        let error = lifecycle
+            .apply(operation(&notes, "remove-absent", absent))
+            .expect_err("an operation record over the limit is refused");
+        assert!(
+            matches!(error, HeuremaError::Persistence { .. }),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("cannot store an operation record of"),
+            "{error}"
+        );
+        assert_eq!(
+            backend.read_staging(&notes).expect("staging"),
+            None,
+            "the refusal came before the stage wrote"
+        );
+        assert_eq!(backend.list_staged().expect("staged"), []);
+        let v3 = IndexVersion::try_from(3).expect("version");
+        assert_eq!(backend.read_version(&notes, v3).expect("version"), None);
+        assert_eq!(backend.read_head(&notes).expect("head"), head);
+
+        let receipt = lifecycle
+            .apply(insert(&notes, "insert-2", 2))
+            .expect("the index is not blocked");
+        assert_eq!(receipt.version(), v3);
     }
 }

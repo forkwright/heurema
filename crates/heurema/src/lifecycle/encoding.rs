@@ -14,9 +14,11 @@
 //!
 //! WHY private: consumers read these records only through the lifecycle's
 //! typed API, never as bytes. The records embed the serde impls of every
-//! public type they contain: `IndexRecord`, `IndexState`, `IndexConfig`
-//! (with `HnswConfig` and `FtsConfig`), `OperationIdentity`, `MemberEntry`,
-//! `MemberChange`, `LifecycleTransition`, the identifiers (`IndexIdentity`,
+//! public type they contain, directly or nested: `IndexRecord`,
+//! `IndexState`, `IndexConfig` (with `HnswConfig` and its `VectorDistance`,
+//! and `FtsConfig` and its `TokenizerConfig`), `OperationIdentity`,
+//! `MemberEntry`, `MemberChange`, `LifecycleTransition`, the identifiers
+//! (`IndexIdentity` with its `OwnerNamespace` and `IndexName`,
 //! `IndexVersion`, `OperationKey`, `OperationDigest`), and the engines
 //! `HnswIndex` and `Bm25Index`, whose serde the snapshot envelope shares.
 //! Changing any of those impls is a format change that bumps

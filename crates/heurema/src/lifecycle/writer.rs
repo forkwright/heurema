@@ -19,10 +19,10 @@ use crate::error::WriterHeldSnafu;
 /// holds it: that thread would otherwise wait for itself forever. The
 /// returned [`WriterGuard`] releases the writer when it is dropped.
 ///
-/// INVARIANT (poison): every critical section only compares or assigns
-/// plain fields and calls nothing that can panic, so a poisoned internal
-/// mutex holds consistent state and its poison is ignored. The guard's
-/// `Drop` could not refuse anyway.
+/// INVARIANT: a poisoned internal mutex holds consistent state, because
+/// every critical section only compares or assigns plain fields and calls
+/// nothing that can panic, so its poison is ignored. The guard's `Drop`
+/// could not refuse anyway.
 ///
 /// # Panics and leaks
 ///
@@ -42,7 +42,7 @@ use crate::error::WriterHeldSnafu;
 /// a single-threaded async executor, a second task on the same thread is
 /// therefore refused rather than deadlocked.
 ///
-/// WARNING (lock order): a thread that holds one backend's writer and takes
+/// WARNING: lock order: a thread that holds one backend's writer and takes
 /// another's can deadlock against a thread doing the reverse. Take the
 /// writers of several backends in one fixed order.
 ///
@@ -111,8 +111,8 @@ impl WriterLock {
         })
     }
 
-    /// The writer's state, locked; see the poison invariant on
-    /// [`WriterLock`].
+    /// The writer's state, locked; see the invariant on [`WriterLock`] for
+    /// why poison is ignored.
     fn state(&self) -> MutexGuard<'_, WriterState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -160,8 +160,8 @@ impl fmt::Debug for WriterLock {
 #[derive(Debug)]
 pub struct WriterGuard<'a> {
     lock: &'a WriterLock,
-    /// WHY: `!Send` (and `Sync`) exactly like the `MutexGuard` it replaces, so
-    /// the thread recorded as owner is always the thread holding the guard.
+    /// WHY: `!Send` (and `Sync`), like a `MutexGuard`, so the thread
+    /// recorded as owner is always the thread holding the guard.
     _not_send: PhantomData<MutexGuard<'static, ()>>,
 }
 
@@ -215,7 +215,11 @@ mod tests {
         let guard = lock.acquire().expect("a free writer is taken");
         let (sender, receiver) = mpsc::channel();
         thread::scope(|scope| {
-            scope.spawn(|| {
+            let waiter = scope.spawn(|| {
+                // WHY moved in: the thread's end, a panic included, then
+                // drops the sender and disconnects the channel, which the
+                // loop below reports instead of polling forever.
+                let sender = sender;
                 let taken = lock.acquire().is_ok();
                 sender.send(taken).expect("the main thread listens");
             });
@@ -225,8 +229,13 @@ mod tests {
                 if lock.waiting() == 1 {
                     break;
                 }
-                if let Ok(taken) = receiver.try_recv() {
-                    panic!("the other thread returned ({taken}) instead of waiting");
+                match receiver.try_recv() {
+                    Ok(taken) => panic!("the other thread returned ({taken}) instead of waiting"),
+                    Err(mpsc::TryRecvError::Disconnected) => match waiter.join() {
+                        Err(panic) => std::panic::resume_unwind(panic),
+                        Ok(()) => panic!("the other thread stopped without a result"),
+                    },
+                    Err(mpsc::TryRecvError::Empty) => {}
                 }
                 thread::yield_now();
             }

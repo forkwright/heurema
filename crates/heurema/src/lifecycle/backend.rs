@@ -36,8 +36,9 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 /// no encoding and no lifecycle rule: it cannot tell what a head, payload,
 /// marker, or operation record says. The only checks it makes are structural
 /// and need no decoding: comparing a head's or marker's bytes
-/// (compare-and-set), never overwriting a stored value, and refusing while
-/// staged state exists.
+/// (compare-and-set), never overwriting a stored value, refusing to stage for
+/// an operation key already recorded, and refusing while staged state
+/// exists.
 ///
 /// A keyed store (the fjall keyspaces of `thesauros`) keeps five maps:
 ///
@@ -80,7 +81,10 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 ///   until then its reads may also miss a write that reached the journal.
 /// - An adapter may refuse a value larger than it can store with
 ///   [`HeuremaError::Persistence`], before writing anything (`thesauros`:
-///   4 GiB per value).
+///   one of more than `u32::MAX` bytes, 4 GiB less one byte).
+///   [`stage`](LifecycleBackend::stage) also refuses when the head or
+///   operation record its publish will write is too large, so a publish is
+///   never refused for size after its stage wrote.
 ///
 /// # Atomicity basis
 ///
@@ -117,7 +121,8 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 /// cannot read or write, and [`HeuremaError::CorruptSnapshot`] when a stored
 /// key does not follow the [`storage_key`] grammar. A write also returns
 /// [`HeuremaError::Persistence`], having written nothing, for a value larger
-/// than the adapter can store (`thesauros`: 4 GiB).
+/// than the adapter can store (`thesauros`: more than `u32::MAX` bytes), and
+/// a stage for a head or operation record its publish could not store.
 ///
 /// WHY object safe: a lifecycle is chosen at runtime (durable or in-memory,
 /// or a test wrapper that injects faults), so `&dyn LifecycleBackend`,
@@ -215,6 +220,12 @@ pub trait LifecycleBackend {
     ///    overwrites.
     /// 4. No operation record exists under `write.key`: stage never leaves
     ///    staged state for an operation that is already recorded.
+    ///
+    /// Before taking the lock, an adapter that bounds value size refuses a
+    /// `write.payload` or `write.marker` it cannot store, and a
+    /// `write.head_len` or `write.operation_len` above its bound: the
+    /// publish would be refused for that value after this stage had left
+    /// its staged version behind.
     ///
     /// # Errors
     ///
@@ -397,11 +408,18 @@ macro_rules! forward_lifecycle_backend {
 
 forward_lifecycle_backend!(&B, Box<B>, Arc<B>);
 
-/// What [`LifecycleBackend::stage`] writes, and the head it expects.
+/// What [`LifecycleBackend::stage`] writes, the head it expects, and the
+/// sizes of the values its publish writes.
 ///
 /// WHY `#[non_exhaustive]` with a constructor: a later field (a checksum,
 /// say) must be addable without breaking adapters, which read these fields
 /// but cannot build the struct by literal.
+///
+/// WHY the publish's sizes are carried: a stage that succeeds leaves staged
+/// state that only its publish or recovery clears. An adapter that bounds
+/// value size checks the head and operation record the publish will write
+/// here, while nothing is written, rather than at publish, where refusing
+/// them would leave the staged version behind as orphan staged state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StageWrite<'a> {
@@ -418,11 +436,19 @@ pub struct StageWrite<'a> {
     pub marker: &'a [u8],
     /// The version payload, stored under [`storage_key::version`].
     pub payload: &'a [u8],
+    /// The length in bytes of the head record ([`PublishWrite::head`]) that
+    /// the publish of this stage writes. The stage stores nothing of it.
+    pub head_len: usize,
+    /// The length in bytes of the operation record
+    /// ([`PublishWrite::operation`]) that the publish of this stage writes.
+    /// The stage stores nothing of it.
+    pub operation_len: usize,
 }
 
 impl<'a> StageWrite<'a> {
     /// Describe a stage of `version` of `index` for the operation `key`,
-    /// computed from `expected_head`.
+    /// computed from `expected_head`, whose publish writes a head record of
+    /// `head_len` bytes and an operation record of `operation_len` bytes.
     #[must_use]
     pub const fn new(
         index: &'a IndexIdentity,
@@ -431,6 +457,8 @@ impl<'a> StageWrite<'a> {
         expected_head: Option<&'a [u8]>,
         marker: &'a [u8],
         payload: &'a [u8],
+        head_len: usize,
+        operation_len: usize,
     ) -> Self {
         Self {
             index,
@@ -439,6 +467,8 @@ impl<'a> StageWrite<'a> {
             expected_head,
             marker,
             payload,
+            head_len,
+            operation_len,
         }
     }
 }

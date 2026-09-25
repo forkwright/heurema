@@ -16,7 +16,11 @@
 //! WHY the concurrent cases prove more on `thesauros` than on `atmis`: a
 //! reader or a racing writer can land inside a write that was split in two
 //! only while the write is suspended between its halves. Each `thesauros`
-//! batch is an fsync wide, so a split there is caught on every run. An
+//! batch is an fsync wide, which on a local disk leaves the reader at most
+//! tens of polls inside each write (see [`READER_ROUNDS`]); every split
+//! tried there so far was caught on every run. That margin is the fsync's
+//! latency: with the tempdir on tmpfs, or on a device whose fsync is very
+//! fast, it shrinks toward the `atmis` case. An
 //! `atmis` write takes nanoseconds, so the same split is almost never
 //! caught; its atomicity rests on one `MutexGuard` held across each write's
 //! checks and effects, which is a review item. On `atmis` these cases check
@@ -140,7 +144,8 @@ fn bytes(kind: &str, index: &IndexIdentity, value: u64) -> Vec<u8> {
 }
 
 /// Stage version `value` of `index` under [`version_key`], with [`bytes`]
-/// for marker and payload.
+/// for marker and payload, and the sizes of the head and operation record
+/// [`publish_staged`] writes.
 fn stage_version(
     backend: &dyn LifecycleBackend,
     index: &IndexIdentity,
@@ -154,6 +159,8 @@ fn stage_version(
         expected_head,
         &bytes("marker", index, value),
         &bytes("payload", index, value),
+        bytes("head", index, value).len(),
+        bytes("operation", index, value).len(),
     ))
 }
 
@@ -343,6 +350,8 @@ fn stage_never_overwrites_an_existing_version_or_marker(
             None,
             b"another marker",
             b"another payload",
+            0,
+            0,
         )));
         assert!(
             matches!(error, HeuremaError::StagedStateExists { .. })
@@ -375,6 +384,8 @@ fn stage_never_overwrites_an_existing_version_or_marker(
         Some(&head),
         b"another marker",
         b"another payload",
+        0,
+        0,
     )));
     assert!(
         matches!(error, HeuremaError::VersionStored { .. }) && refused_version(&error) == Some(1),
@@ -401,6 +412,8 @@ fn stage_refuses_an_operation_key_already_recorded(backend: &dyn LifecycleBacken
         Some(&head),
         &bytes("marker", &notes, 2),
         &bytes("payload", &notes, 2),
+        0,
+        0,
     )));
     assert!(
         matches!(error, HeuremaError::OperationRecorded { ref key, .. } if key.as_str() == "op-1"),
@@ -709,6 +722,8 @@ fn quarantine_moves_staged_state_and_never_deletes_it(
         None,
         b"retry marker",
         b"retry payload",
+        0,
+        0,
     ))?;
     backend.quarantine(QuarantineWrite::new(&notes, v1, b"retry marker"))?;
     let second = QuarantinedEntry::new(
@@ -882,7 +897,12 @@ fn listings_come_back_in_storage_key_order(backend: &dyn LifecycleBackend) -> Te
 /// Rounds of [`a_concurrent_reader_never_sees_part_of_a_write`].
 ///
 /// WHY this few: on `thesauros` each round is eleven `SyncAll` writes, each
-/// an fsync, and the reader polls thousands of times inside each one.
+/// an fsync. On a local disk the reader polls at most tens of times per
+/// write (about 20,000 polls over a run's 275 writes, and a few per write
+/// under a parallel build), which has been enough for every split write
+/// tried to fail this case on every run. Detection depends on fsync
+/// latency: a tempdir on tmpfs, or a very fast fsync, weakens the
+/// `thesauros` case. The failure message reports the poll count.
 const READER_ROUNDS: usize = 25;
 
 /// Versions each reader round stages and publishes before it destroys.
@@ -1248,6 +1268,8 @@ fn racing_writers_on_one_index_admit_exactly_one<B: LifecycleBackend + Sync>(
                 None,
                 &own("marker", thread),
                 &own("payload", thread),
+                own("head", thread).len(),
+                own("operation", thread).len(),
             ))
         });
         let stager = sole_winner(
@@ -1305,42 +1327,55 @@ fn racing_writers_on_one_index_admit_exactly_one<B: LifecycleBackend + Sync>(
         );
         let destroyed = own("destroyed", destroyer);
         assert_eq!(backend.read_head(&index)?, Some(destroyed.clone()));
-
-        // NOTE: the backend reads a destroyed head as opaque bytes like any
-        // other, so a version staged against it gives the quarantine race a
-        // marker to move.
-        let v2 = version(2)?;
-        let (marker, payload) = (bytes("marker", &index, 2), bytes("payload", &index, 2));
-        backend.stage(StageWrite::new(
-            &index,
-            v2,
-            &key("q")?,
-            Some(&destroyed),
-            &marker,
-            &payload,
-        ))?;
-        let quarantined = race(|_| backend.quarantine(QuarantineWrite::new(&index, v2, &marker)));
-        sole_winner(
-            quarantined,
-            |error| matches!(error, HeuremaError::StagedStateMissing { version, .. } if version.get() == 2),
-            &format!("round {round} quarantine"),
-        );
-        let entries: Vec<QuarantinedEntry> = backend
-            .list_quarantined()?
-            .into_iter()
-            .filter(|entry| entry.index == index)
-            .collect();
-        let [entry] = entries.as_slice() else {
-            panic!("round {round}: exactly one quarantine entry, not {entries:?}");
-        };
-        assert_eq!(
-            (entry.version, &entry.marker, &entry.payload),
-            (v2, &marker, &Some(payload)),
-            "round {round}"
-        );
-        assert_eq!(backend.read_staging(&index)?, None);
-        assert_eq!(backend.read_version(&index, v2)?, None);
+        race_quarantines(backend, round, &index, &destroyed)?;
     }
+    Ok(())
+}
+
+/// The last phase of [`racing_writers_on_one_index_admit_exactly_one`]:
+/// racing quarantines of one staged marker admit exactly one.
+fn race_quarantines<B: LifecycleBackend + Sync>(
+    backend: &B,
+    round: usize,
+    index: &IndexIdentity,
+    destroyed: &[u8],
+) -> TestResult {
+    // NOTE: the backend reads a destroyed head as opaque bytes like any
+    // other, so a version staged against it gives the quarantine race a
+    // marker to move.
+    let v2 = version(2)?;
+    let (marker, payload) = (bytes("marker", index, 2), bytes("payload", index, 2));
+    backend.stage(StageWrite::new(
+        index,
+        v2,
+        &key("q")?,
+        Some(destroyed),
+        &marker,
+        &payload,
+        0,
+        0,
+    ))?;
+    let quarantined = race(|_| backend.quarantine(QuarantineWrite::new(index, v2, &marker)));
+    sole_winner(
+        quarantined,
+        |error| matches!(error, HeuremaError::StagedStateMissing { version, .. } if version.get() == 2),
+        &format!("round {round} quarantine"),
+    );
+    let entries: Vec<QuarantinedEntry> = backend
+        .list_quarantined()?
+        .into_iter()
+        .filter(|entry| entry.index == *index)
+        .collect();
+    let [entry] = entries.as_slice() else {
+        panic!("round {round}: exactly one quarantine entry, not {entries:?}");
+    };
+    assert_eq!(
+        (entry.version, &entry.marker, &entry.payload),
+        (v2, &marker, &Some(payload)),
+        "round {round}"
+    );
+    assert_eq!(backend.read_staging(index)?, None);
+    assert_eq!(backend.read_version(index, v2)?, None);
     Ok(())
 }
 

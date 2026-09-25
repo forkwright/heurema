@@ -39,11 +39,14 @@
 //! let version = IndexVersion::FIRST;
 //!
 //! // Values are opaque bytes here; heurēma's lifecycle encodes the real records.
-//! backend.stage(StageWrite::new(&index, version, &key, None, b"marker", b"payload"))?;
+//! let (head, operation) = (b"head", b"operation");
+//! backend.stage(StageWrite::new(
+//!     &index, version, &key, None, b"marker", b"payload", head.len(), operation.len(),
+//! ))?;
 //! assert_eq!(backend.read_head(&index)?, None, "staging moves no head");
 //!
 //! backend.publish(PublishWrite::new(
-//!     &index, version, &key, None, b"marker", b"head", b"operation",
+//!     &index, version, &key, None, b"marker", head, operation,
 //! ))?;
 //! assert_eq!(backend.read_head(&index)?, Some(b"head".to_vec()));
 //! assert_eq!(backend.read_staging(&index)?, None, "publish removes the marker");
@@ -584,6 +587,8 @@ mod tests {
                 None,
                 b"marker",
                 b"payload",
+                0,
+                0,
             ))
             .expect("stage before the panic");
 
@@ -639,7 +644,7 @@ mod tests {
         let key = OperationKey::try_from("op-1").expect("key");
         backend
             .stage(StageWrite::new(
-                &index, version, &key, None, b"marker", b"payload",
+                &index, version, &key, None, b"marker", b"payload", 0, 0,
             ))
             .expect("stage");
         // WHY: stage writes both halves together, so only a damaged store

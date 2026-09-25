@@ -56,7 +56,9 @@ use crate::{HeuremaError, OperationConflictDetail};
 ///    members in ascending identity order, and every write is encoded.
 ///    Every engine refusal happens here.
 /// 9. Stage: the version payload and its staging marker, in one durable
-///    write that changes no head (Destroy stages nothing).
+///    write that changes no head (Destroy stages nothing). The stage also
+///    carries the sizes of the head and operation record step 10 writes, so
+///    a backend refuses a value it cannot store before anything is staged.
 /// 10. Publish: the new head, the operation record, and the removal of the
 ///     staging marker, in one atomic durable write. This is the only point
 ///     at which the operation becomes visible.
@@ -231,11 +233,11 @@ where
     /// change. Until then, an index whose operation was interrupted between
     /// stage and publish keeps its orphan staged state, and every mutation
     /// of that index is refused with [`HeuremaError::StagedStateExists`];
-    /// other indexes are unaffected. Recovery takes the backend's writer, so
-    /// it waits for, and never quarantines, another lifecycle's live stage
-    /// (a direct backend caller that does not hold the writer for its whole
-    /// operation has no such protection); on a thread already holding the
-    /// writer it is refused with [`HeuremaError::WriterHeld`].
+    /// other indexes are unaffected. Recovery, when it lands, must take the
+    /// backend's writer for its whole pass, so that it waits for, and never
+    /// quarantines, another lifecycle's live stage (a direct backend caller
+    /// that does not hold the writer for its whole operation has no such
+    /// protection). Opening itself takes no writer.
     ///
     /// # Errors
     ///
@@ -430,8 +432,9 @@ where
 
     /// Step 5: the payload of `version`, which `head` names as active, or
     /// `None` when the payload is gone because the index was destroyed since
-    /// `head` was read (only a writer that bypasses the backend's writer can
-    /// do that).
+    /// `head` was read. [`prepare`](Self::prepare) holds the backend's
+    /// writer, so there only a writer that bypasses it can do that;
+    /// [`index`](Self::index) holds no writer, so any concurrent destroy can.
     ///
     /// WHY the second head read: payloads are removed only by destroy, in
     /// the same write that marks the head destroyed. A payload missing under
@@ -463,8 +466,9 @@ where
 
 impl<'a, B: LifecycleBackend, M, P, R> Prepared<'a, B, M, P, R> {
     /// Step 9: stages the version payload and its marker in one durable
-    /// write that changes no head. A Destroy stages nothing; its only write
-    /// is [`Staged::publish`].
+    /// write that changes no head, passing the sizes of the head and
+    /// operation record [`Staged::publish`] writes. A Destroy stages
+    /// nothing; its only write is [`Staged::publish`].
     ///
     /// # Errors
     ///
@@ -475,7 +479,9 @@ impl<'a, B: LifecycleBackend, M, P, R> Prepared<'a, B, M, P, R> {
     /// when a payload is already stored under the version, and
     /// [`HeuremaError::OperationRecorded`] when the operation's key was
     /// recorded meanwhile. [`HeuremaError::Persistence`] when the backend
-    /// fails; see [`LifecycleBackend::stage`].
+    /// fails, or, having written nothing, when the payload, the marker, the
+    /// head, or the operation record is larger than the backend stores; see
+    /// [`LifecycleBackend::stage`].
     pub fn stage(self) -> Result<Staged<'a, B, M, P, R>, HeuremaError> {
         let Self {
             lifecycle,
@@ -497,6 +503,8 @@ impl<'a, B: LifecycleBackend, M, P, R> Prepared<'a, B, M, P, R> {
                     expected_head.as_deref(),
                     &marker,
                     &payload,
+                    plan.head.len(),
+                    plan.record.len(),
                 ))?;
                 StagedWrite::Version {
                     expected_head,

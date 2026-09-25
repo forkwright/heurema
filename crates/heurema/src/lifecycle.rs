@@ -76,8 +76,9 @@
 //! [`storage_key`](crate::lifecycle::storage_key) grammar, and four writes
 //! (stage, publish, destroy, quarantine), each atomic and durable before it
 //! returns. The backend enforces only structural rules (compare-and-set on
-//! the head, never overwriting, refusing while staged state exists); it
-//! decodes nothing. heurēma owns every encoding: a head names the index's
+//! the head, never overwriting, refusing to stage for an operation key
+//! already recorded, refusing while staged state exists); it decodes
+//! nothing. heurēma owns every encoding: a head names the index's
 //! [`IndexRecord`], a version payload holds one version's engine and its
 //! member table ([`MemberEntry`] per member: provenance, introducing
 //! version, superseded version), a staging marker names the operation that
@@ -103,8 +104,11 @@
 //! the backend's writer, head read, replay lookup by key and digest, the
 //! active version's payload, permission, staged-state check, an in-memory
 //! build of the successor version, stage, publish. The checks write
-//! nothing, so a refused operation leaves storage as it was, and a
-//! stateless refusal makes no backend call at all.
+//! nothing, so an operation refused before it stages leaves storage as it
+//! was, and a stateless refusal makes no backend call at all. A publish
+//! refused after its stage leaves the staged version behind as orphan
+//! staged state; only a writer that bypasses the shared writer, or damage,
+//! causes one.
 //!
 //! Every lifecycle over one backend shares the backend's [`WriterLock`]
 //! ([`LifecycleBackend::writer`]), held from before the head read until the
@@ -154,11 +158,14 @@
 //! - Destroy removes every version payload in its one atomic write, and
 //!   keeps the head and every operation record, so the destroyed index stays
 //!   explainable.
-//! - `thesauros` stores a lifecycle value of at most 4 GiB. A version
-//!   payload holds one index's whole engine and member table as JSON, so a
-//!   large enough index is refused with
+//! - `thesauros` stores a lifecycle value of less than 4 GiB (at most
+//!   2^32 - 1 bytes). A version payload holds one index's whole engine and
+//!   member table as JSON, and an operation record lists every member its
+//!   operation changed (a Remove's absent members included), so a large
+//!   enough index or operation is refused with
 //!   [`HeuremaError::Persistence`](crate::HeuremaError::Persistence) before
-//!   anything is written.
+//!   anything is written: the stage checks the head and operation record
+//!   its publish will write, as well as its own payload and marker.
 //!
 //! # Example
 //!

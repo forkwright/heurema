@@ -1962,7 +1962,9 @@ fn joined<T>(result: thread::Result<T>) -> T {
 
 /// Waits until another thread waits for `backend`'s writer, failing if
 /// `finished` reports that thread's operation first. Returns early when
-/// that thread stopped without a result, whose error its join reports.
+/// that thread stopped without a result, whose error or panic its join
+/// reports. That thread must own the channel's only sender, so that its
+/// end, a panic included, disconnects the channel.
 ///
 /// WHY the writer's `Debug` form: it is the public view of how many threads
 /// wait in `WriterLock::acquire`, so this needs no sleep and no timeout.
@@ -2000,6 +2002,10 @@ fn a_lifecycle_on_another_thread_waits_for_a_live_stage_then_builds_on_it<S: Sto
 
     let (published, waiter) = thread::scope(|scope| {
         let waiter = scope.spawn(|| {
+            // WHY moved in: a borrowed sender would outlive this thread, so
+            // an early return or a panic here would leave the main thread
+            // polling a channel that never disconnects.
+            let finish = finish;
             let second = Lifecycle::open(&backend)?;
             let applied = second.apply(insert(&notes, "b", vec![vector(4, 40, &[0.0, 1.0])])?);
             assert!(
@@ -2030,9 +2036,14 @@ fn a_lifecycle_on_another_thread_waits_for_a_live_stage_then_builds_on_it<S: Sto
 }
 
 fn the_same_key_on_two_threads_publishes_once_and_replays_once<S: Store>(store: &S) -> TestResult {
-    // WHY a smoke test: whichever thread takes the writer first publishes,
-    // and the other replays. Only a scheduling that splits the head read and
-    // the replay lookup could break it, which the hook cases below force.
+    // WHY a smoke test of the shared writer: whichever thread takes it first
+    // publishes, and the other replays. Without the writer, both threads can
+    // read the head and miss the replay before either stages, and the loser
+    // is refused (`StagedStateExists` or `HeadChanged`) instead of replaying.
+    // That race is probabilistic here; the re-entry and live-stage cases
+    // prove the writer deterministically. The hook cases below cover a
+    // split of the head read and the replay lookup, which only a writer
+    // that bypasses the shared one can produce.
     let backend = store.open()?;
     let notes = index("notes")?;
     seeded(&Lifecycle::open(&backend)?, &notes)?;

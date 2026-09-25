@@ -134,7 +134,7 @@ pub enum HeuremaError {
     /// violating an engine invariant or contradicting the key they were
     /// stored under, are corrupt rather than a backend I/O failure, and
     /// retrying the read cannot help. A snapshot is saved again from a
-    /// rebuilt index; a lifecycle record has no repair path yet (see
+    /// rebuilt index; a lifecycle record has no repair path (see
     /// [`ErrorCategory::Corrupt`]).
     #[snafu(display("corrupt stored index data: {source}"))]
     CorruptSnapshot {
@@ -509,9 +509,10 @@ pub enum ErrorCategory {
     /// invariant, or belong to another index family, or stored lifecycle
     /// state contradicts itself. Retrying the read cannot succeed. A
     /// snapshot is saved again from a rebuilt index; a lifecycle record
-    /// (head, payload, or operation record) has no repair path yet, and
-    /// recovery and quarantine arrive in a later Phase 02 change. One
-    /// exception: [`HeuremaError::VersionStored`] also reaches a direct
+    /// (head, payload, or operation record) has no repair path. Recovery,
+    /// which a later Phase 02 change adds, moves only staged state to
+    /// quarantine and refuses an unreadable head. One exception:
+    /// [`HeuremaError::VersionStored`] also reaches a direct
     /// [`LifecycleBackend`](crate::LifecycleBackend) caller that stages a
     /// version already published, whose store is intact (see that variant).
     Corrupt,
