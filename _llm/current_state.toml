@@ -9,8 +9,12 @@ source_docs = [
 
 [state]
 summary = "Phase 01 is complete: fresh HNSW (an in-memory navigable graph) and BM25 (the Simple pipeline) implement VectorIndex and FtsIndex, BM25 matches an independently written formula reference, the conformance oracle runs every case live, and both persistence adapters (atmis, thesauros) store versioned per-index snapshot envelopes. Reciprocal-rank fusion is implemented. Snapshots are whole-index saves, not transactions; Phase 02 adds the durable retrieval lifecycle, and the akolouthia Datalog engine (Phase 03) is not yet built. krites is behavioural reference and conformance oracle only, never a code source."
-current_phase = "Phase 01 fresh retrieval engines complete (BM25 #48, HNSW #50, versioned snapshots #51, independent BM25 formula oracle); Phase 02 durable retrieval lifecycle in progress (lifecycle type vocabulary and pre-publish validation landed)"
+current_phase = "Phase 01 fresh retrieval engines complete (BM25 #48, HNSW #50, versioned snapshots #51, independent BM25 formula oracle); Phase 02 durable retrieval lifecycle in progress (lifecycle type vocabulary, pre-publish validation, and LifecycleBackend storage layer landed; driver and recovery next)"
 updated = "2026-09-25"
+
+[[recent]]
+date = "2026-09-25"
+item = "Phase 02 lifecycle storage layer: heurema::LifecycleBackend, an object-safe trait beside the unchanged PersistenceBackend, stores opaque heurema-encoded bytes under one storage_key grammar in five maps (heads, versions, staging, operations, quarantine). Stage, publish, destroy, and quarantine are each atomic and durable before Ok (atmis: one mutex; thesauros: one fjall SyncAll write batch under a backend-owned lock); each compares the head or staged marker it expects, never overwrites a payload or operation record, and refuses while an index holds staged state. Recovery-side listings and quarantine are declared now so recovery adds no required method. New HeuremaError variants StagedStateExists, HeadChanged, OperationConflict (boxed detail), StagedStateMissing, OperationRecorded, and ErrorCategory Conflict and RecoveryRequired. crates/thesauros/tests/lifecycle_backend.rs runs every case on both adapters, reopens fjall, and injects faults before and after each write. No driver, encoding, or recovery pass yet."
 
 [[recent]]
 date = "2026-09-25"

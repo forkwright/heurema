@@ -25,17 +25,17 @@ layers = [
 [[architecture.crates]]
 name = "heurema"
 path = "crates/heurema"
-role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary and pre-publish validation (lifecycle module: identities, operations, transitions, index record, CheckedOperation / ValidatedOperation, the canonical OperationDigest; pure functions, no storage yet), and the workspace error chain with its ErrorCategory classification."
+role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary and pre-publish validation (lifecycle module: identities, operations, transitions, index record, CheckedOperation / ValidatedOperation, the canonical OperationDigest; pure functions) and its storage contract (LifecycleBackend, storage_key), and the workspace error chain with its ErrorCategory classification."
 
 [[architecture.crates]]
 name = "atmis"
 path = "crates/atmis"
-role = "In-memory PersistenceBackend adapter: HashMap<String, Vec<u8>> snapshots behind an RwLock, each a versioned SnapshotEnvelope encoded with serde_json. No disk I/O; the default backend for tests."
+role = "In-memory PersistenceBackend and LifecycleBackend adapter: HashMap<String, Vec<u8>> snapshots behind an RwLock, each a versioned SnapshotEnvelope encoded with serde_json, and five lifecycle maps behind one Mutex so every lifecycle write is one guarded mutation (a poisoned lock is refused, never recovered). No disk I/O; the default backend for tests."
 
 [[architecture.crates]]
 name = "thesauros"
 path = "crates/thesauros"
-role = "Durable PersistenceBackend adapter: a fjall database with separate vector_indexes/fts_indexes keyspaces, each snapshot a versioned SnapshotEnvelope encoded with serde_json, fsyncing (PersistMode::SyncAll) after every write."
+role = "Durable PersistenceBackend and LifecycleBackend adapter: a fjall database with separate vector_indexes/fts_indexes keyspaces, each snapshot a versioned SnapshotEnvelope encoded with serde_json, fsyncing (PersistMode::SyncAll) after every write; five fixed lifecycle keyspaces, every lifecycle write one SyncAll write batch committed under a backend-owned lock, reads through an fjall snapshot."
 
 [[interfaces]]
 crate = "heurema"
@@ -107,7 +107,19 @@ purpose = "Type-erased adapter for backend-specific persistence errors, kept wal
 crate = "heurema"
 kind = "type"
 name = "ErrorCategory"
-purpose = "Class of a HeuremaError (Refused, NotFound, Unsupported, Corrupt, Storage), returned by HeuremaError::category() through an exhaustive match so a consumer can decide retry, report, or repair without matching variants."
+purpose = "Class of a HeuremaError (Refused, NotFound, Unsupported, Corrupt, Storage, Conflict, RecoveryRequired), returned by HeuremaError::category() through an exhaustive match so a consumer can decide retry, report, or repair without matching variants."
+
+[[interfaces]]
+crate = "heurema"
+kind = "trait"
+name = "LifecycleBackend"
+purpose = "Object-safe storage contract of the durable lifecycle, beside the unchanged PersistenceBackend (which has no delete, exists, batch, or compare-and-set and is not dyn-compatible). Adapters store opaque heurema-encoded bytes under the storage_key grammar and own no encoding or rule. stage, publish, destroy, and quarantine are each atomic and durable before Ok; each compares the head (or staged marker) it expects under a backend-owned lock, never overwrites a payload or operation record, and refuses while the index holds staged state. read_* and list_* serve the driver and recovery. Implemented by AtmisBackend and ThesaurosBackend, and forwarded through &B, Box<B>, and Arc<B>."
+
+[[interfaces]]
+crate = "heurema"
+kind = "module"
+name = "storage_key"
+purpose = "The one key grammar both lifecycle adapters use: namespace/name heads, namespace/name/{version:020} payloads and staging markers, namespace/name/key operation records, and {sequence:020}/namespace/name/{version:020}/marker|payload quarantine entries, with parsers that report a malformed stored key as CorruptSnapshot. Each kind lives in its own map, because a digits-only operation key spells a version key."
 
 [[interfaces]]
 crate = "heurema"

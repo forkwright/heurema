@@ -66,12 +66,34 @@
 //! [`RetentionReference`] marker traits. heurēma defines no provenance or
 //! retention shape and never interprets either value.
 //!
+//! # Storage
+//!
+//! [`LifecycleBackend`] is the storage contract the lifecycle runs on: five
+//! maps of opaque heurēma-encoded bytes under one
+//! [`storage_key`](crate::lifecycle::storage_key) grammar, and four writes
+//! (stage, publish, destroy, quarantine), each atomic and durable before it
+//! returns. The backend enforces only structural rules (compare-and-set on
+//! the head, never overwriting, refusing while staged state exists); it
+//! decodes nothing.
+//!
+//! `atmis` and `thesauros` implement it. `atmis` applies each write under
+//! one mutex over all five maps. `thesauros` commits each write as one fjall
+//! write batch with `PersistMode::SyncAll`, which fjall journals as one
+//! checksummed unit and replays only whole, so a crash leaves all of a write
+//! or none of it.
+//!
+//! A version staged but never published is orphan staged state. It blocks
+//! staging and destroying its index until recovery (Phase 02 Slice 4) moves
+//! it to quarantine; nothing clears it before then, and nothing deletes it.
+//!
 //! # Limits
 //!
-//! Snapshots are not transactions; this module defines the durable
-//! lifecycle's vocabulary and validation, not its storage. Nothing here reads
-//! or writes a backend: validation and the digest are pure functions of the
-//! operation and the record the caller supplies.
+//! Snapshots are not transactions. This module does not yet drive the
+//! lifecycle: nothing here encodes a head, payload, marker, or operation
+//! record. Validation and the digest are pure functions of the operation and
+//! the record the caller supplies; the driver that stages and publishes a
+//! validated operation through a [`LifecycleBackend`] lands in a later
+//! Phase 02 change.
 //!
 //! # Example
 //!
@@ -128,12 +150,18 @@
 //! # Ok::<(), heurema::HeuremaError>(())
 //! ```
 
+mod backend;
 mod digest;
 mod identity;
 mod member;
 mod operation;
 mod record;
 mod validate;
+
+pub use backend::{
+    DestroyWrite, LIFECYCLE_FORMAT_VERSION, LifecycleBackend, PublishWrite, QuarantineWrite,
+    QuarantinedEntry, StageWrite, StagedEntry, storage_key,
+};
 
 pub use identity::{
     IdentifierKind, IndexIdentity, IndexName, IndexVersion, OperationDigest, OperationIdentity,

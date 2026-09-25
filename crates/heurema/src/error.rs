@@ -4,7 +4,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::SnapshotFamily;
-use crate::lifecycle::{IdentifierKind, IndexIdentity, IndexStateKind, LifecycleTransition};
+use crate::lifecycle::{
+    IdentifierKind, IndexIdentity, IndexStateKind, IndexVersion, LifecycleTransition,
+    OperationDigest, OperationKey,
+};
 
 /// WHY: Backend errors are type-erased only at the persistence boundary while
 /// SNAFU still receives a concrete source type for error-chain reporting.
@@ -285,6 +288,149 @@ pub enum HeuremaError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+
+    // NOTE: lifecycle storage refusals, raised by a `LifecycleBackend` write or
+    // by the replay check that reads the operation records it keeps.
+    /// WHY: a version staged but never published is the only record of an
+    /// interrupted operation. Staging over it would destroy that record, and
+    /// destroying the index beside it would leave a marker no head can
+    /// explain, so every later stage or destroy of the index is refused
+    /// until recovery moves the staged state to quarantine.
+    #[snafu(display(
+        "index {index} holds interrupted staged state for version {version}; nothing was written"
+    ))]
+    StagedStateExists {
+        /// The index holding the staged state.
+        index: IndexIdentity,
+        /// The staged version found.
+        version: IndexVersion,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: a lifecycle write is computed from the head it read. If another
+    /// writer moved the head in between, applying the write would build on a
+    /// state that is no longer current, so the backend compares the head
+    /// under its own lock and refuses instead.
+    #[snafu(display("index {index} changed since its head was read; nothing was written"))]
+    HeadChanged {
+        /// The index whose head changed.
+        index: IndexIdentity,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: an operation key names one operation forever. The same key with
+    /// a different digest is a different operation reusing the key; applying
+    /// it would make the key's recorded outcome describe content it never
+    /// saw, so it is refused and both digests are reported. The detail is
+    /// boxed to keep `HeuremaError` within clippy's `result_large_err` bound.
+    #[snafu(display(
+        "operation key {} on index {} is recorded with digest {}, not the requested {}",
+        conflict.key(),
+        conflict.index(),
+        conflict.recorded(),
+        conflict.requested()
+    ))]
+    OperationConflict {
+        /// The index, key, and both digests.
+        conflict: Box<OperationConflictDetail>,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: publish and quarantine act on one exact staged state, named by
+    /// its marker bytes. If the marker is gone, holds other bytes, or lost
+    /// its payload, another writer published, quarantined, or restaged that
+    /// version, and acting anyway would publish or move state this caller
+    /// never staged.
+    #[snafu(display(
+        "index {index} holds no staged state for version {version} matching this write; nothing was written"
+    ))]
+    StagedStateMissing {
+        /// The index the write named.
+        index: IndexIdentity,
+        /// The staged version the write named.
+        version: IndexVersion,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: an operation record is the audit entry of a published operation
+    /// and is never overwritten. A second publish under a recorded key means
+    /// the caller missed that record; it must read the record back and
+    /// replay or refuse, never write over it.
+    #[snafu(display("index {index} already records operation {key}; nothing was written"))]
+    OperationRecorded {
+        /// The index the write named.
+        index: IndexIdentity,
+        /// The operation key already recorded.
+        key: OperationKey,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+}
+
+/// The index, key, and digests of an [`HeuremaError::OperationConflict`].
+///
+/// WHY: the conflict carries two identifiers and two digests, which would
+/// push `HeuremaError` past clippy's 128-byte `result_large_err` threshold;
+/// the variant boxes this detail instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OperationConflictDetail {
+    index: IndexIdentity,
+    key: OperationKey,
+    recorded: OperationDigest,
+    requested: OperationDigest,
+}
+
+impl OperationConflictDetail {
+    /// WHY: every part is an already validated identifier, so pairing them
+    /// cannot fail.
+    #[must_use]
+    pub const fn new(
+        index: IndexIdentity,
+        key: OperationKey,
+        recorded: OperationDigest,
+        requested: OperationDigest,
+    ) -> Self {
+        Self {
+            index,
+            key,
+            recorded,
+            requested,
+        }
+    }
+
+    /// The index the key belongs to.
+    #[must_use]
+    pub const fn index(&self) -> &IndexIdentity {
+        &self.index
+    }
+
+    /// The operation key both operations use.
+    #[must_use]
+    pub const fn key(&self) -> &OperationKey {
+        &self.key
+    }
+
+    /// The digest recorded when the key's operation was published.
+    #[must_use]
+    pub const fn recorded(&self) -> &OperationDigest {
+        &self.recorded
+    }
+
+    /// The digest of the operation that reused the key.
+    #[must_use]
+    pub const fn requested(&self) -> &OperationDigest {
+        &self.requested
+    }
 }
 
 /// The class of failure a [`HeuremaError`] belongs to.
@@ -315,6 +461,16 @@ pub enum ErrorCategory {
     /// error's source chain carries the backend's cause. Whether a retry can
     /// succeed depends on that cause.
     Storage,
+    /// The write collides with state another writer recorded: the head
+    /// moved after it was read, the staged state it names changed, or its
+    /// operation key is already recorded. Nothing was written. Reading the
+    /// state again decides what follows: a replay, a fresh attempt, or a
+    /// refusal.
+    Conflict,
+    /// The index holds interrupted staged state from an operation that never
+    /// published. Staging and destroying that index are refused until
+    /// recovery moves the state to quarantine; other indexes are unaffected.
+    RecoveryRequired,
 }
 
 impl HeuremaError {
@@ -343,11 +499,18 @@ impl HeuremaError {
             }
             Self::SnapshotFormat { .. } | Self::CorruptSnapshot { .. } => ErrorCategory::Corrupt,
             Self::Persistence { .. } => ErrorCategory::Storage,
+            // NOTE: lifecycle storage refusals.
+            Self::HeadChanged { .. }
+            | Self::OperationConflict { .. }
+            | Self::StagedStateMissing { .. }
+            | Self::OperationRecorded { .. } => ErrorCategory::Conflict,
+            Self::StagedStateExists { .. } => ErrorCategory::RecoveryRequired,
         }
     }
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests need concise identifier fixtures")]
 mod tests {
     use std::collections::BTreeSet;
 
@@ -411,6 +574,30 @@ mod tests {
             }
             .build(),
             UnencodableOperationSnafu { reason: "f64" }.build(),
+            // NOTE: lifecycle storage refusals.
+            StagedStateExistsSnafu {
+                index: sample_index(),
+                version: IndexVersion::FIRST,
+            }
+            .build(),
+            HeadChangedSnafu {
+                index: sample_index(),
+            }
+            .build(),
+            OperationConflictSnafu {
+                conflict: Box::new(sample_conflict()),
+            }
+            .build(),
+            StagedStateMissingSnafu {
+                index: sample_index(),
+                version: IndexVersion::FIRST,
+            }
+            .build(),
+            OperationRecordedSnafu {
+                index: sample_index(),
+                key: sample_key(),
+            }
+            .build(),
         ]
     }
 
@@ -432,6 +619,19 @@ mod tests {
             panic!("sample identifiers are grammar-conformant");
         };
         IndexIdentity::new(namespace, name)
+    }
+
+    fn sample_key() -> OperationKey {
+        OperationKey::try_from("op-1").expect("key")
+    }
+
+    fn sample_conflict() -> OperationConflictDetail {
+        OperationConflictDetail::new(
+            sample_index(),
+            sample_key(),
+            OperationDigest::try_from("0a".repeat(32)).expect("recorded digest"),
+            OperationDigest::try_from("0b".repeat(32)).expect("requested digest"),
+        )
     }
 
     /// The expected category of each variant, one arm per variant and no
@@ -468,6 +668,20 @@ mod tests {
             HeuremaError::UnencodableOperation { .. } => {
                 ("UnencodableOperation", ErrorCategory::Refused)
             }
+            // NOTE: lifecycle storage refusals.
+            HeuremaError::StagedStateExists { .. } => {
+                ("StagedStateExists", ErrorCategory::RecoveryRequired)
+            }
+            HeuremaError::HeadChanged { .. } => ("HeadChanged", ErrorCategory::Conflict),
+            HeuremaError::OperationConflict { .. } => {
+                ("OperationConflict", ErrorCategory::Conflict)
+            }
+            HeuremaError::StagedStateMissing { .. } => {
+                ("StagedStateMissing", ErrorCategory::Conflict)
+            }
+            HeuremaError::OperationRecorded { .. } => {
+                ("OperationRecorded", ErrorCategory::Conflict)
+            }
         }
     }
 
@@ -501,9 +715,51 @@ mod tests {
                 "TransitionNotPermitted",
                 "UnencodableOperation",
                 "UnsupportedSnapshotVersion",
+                // NOTE: lifecycle storage refusals.
+                "StagedStateExists",
+                "HeadChanged",
+                "OperationConflict",
+                "StagedStateMissing",
+                "OperationRecorded",
             ]),
             "every variant is sampled"
         );
+    }
+
+    #[test]
+    fn error_displays_carry_no_em_dash() {
+        for error in every_variant() {
+            let message = error.to_string();
+            assert!(!message.contains('\u{2014}'), "{message}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_refusals_name_the_index_and_what_was_found() {
+        let staged = StagedStateExistsSnafu {
+            index: sample_index(),
+            version: IndexVersion::FIRST,
+        }
+        .build();
+        assert_eq!(
+            staged.to_string(),
+            "index example/notes holds interrupted staged state for version 1; nothing was written"
+        );
+
+        let conflict = OperationConflictSnafu {
+            conflict: Box::new(sample_conflict()),
+        }
+        .build();
+        let message = conflict.to_string();
+        assert!(message.contains("op-1"), "{message}");
+        assert!(message.contains("example/notes"), "{message}");
+        assert!(message.contains(&"0a".repeat(32)), "{message}");
+        assert!(message.contains(&"0b".repeat(32)), "{message}");
+
+        let detail = sample_conflict();
+        assert_eq!(detail.index(), &sample_index());
+        assert_eq!(detail.key(), &sample_key());
+        assert_ne!(detail.recorded(), detail.requested());
     }
 
     #[test]

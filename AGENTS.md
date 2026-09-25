@@ -13,7 +13,7 @@ heurēma is a fleet substrate providing HNSW vector, BM25 full-text, persistence
 Agents working here:
 
 - maintain the fresh HNSW (`src/hnsw/engine.rs`) and BM25 (`src/fts/bm25.rs`) engines and build the Phase 02 durable retrieval lifecycle, per `CLAUDE.md`'s Roadmap section — `krites` is behavioural reference and conformance oracle only, permanently, never a code source;
-- maintain the `thesauros` / `atmis` `PersistenceBackend` adapters;
+- maintain the `thesauros` / `atmis` `PersistenceBackend` and `LifecycleBackend` adapters;
 - fix CI / lint / gate failures;
 - maintain the trait surface against consumer drift.
 
