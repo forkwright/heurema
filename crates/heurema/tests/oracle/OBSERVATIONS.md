@@ -37,7 +37,7 @@ Gathered from test and file names on the pinned tree's public test surface.
 
 | Class | Coverage |
 |-------|----------|
-| Degenerate inputs score zero (zero tf, zero df, empty corpus) | `bm25::empty_index_query_returns_no_results`, `bm25::no_match_query_returns_no_results` at trait level; the per-component zero cases are formula internals with trait-level coverage only; `src/fts/bm25.rs` has no unit test for them yet |
+| Degenerate inputs score zero (zero tf, zero df, empty corpus) | `bm25::empty_index_query_returns_no_results`, `bm25::no_match_query_returns_no_results` at trait level; the per-component cases are checked by `bm25_formula::engine_matches_the_formula_reference_on_generated_workloads` against an independently written `f64` reference on seeded insert/replace/remove workloads: a document with zero tf for every query term is never returned, a query term with zero df contributes nothing, a query yielding no tokens returns nothing, and a document yielding no tokens still counts toward N and avgdl |
 | Typical input scores nonzero | implicit in every ranking assertion |
 | Length normalization direction: longer document scores lower at equal tf | `bm25::length_normalization_prefers_the_shorter_document` |
 | BM25 differs from plain tf-idf (tf saturation) | `bm25::term_frequency_saturates` |
@@ -62,11 +62,12 @@ Gathered from test and file names on the pinned tree's public test surface.
 | HNSW result-cache eviction and retention | not covered — an engine-internal choice; the trait exposes no cache |
 | Storage-backed close/reopen preserves recall | not oracle territory — owned by the `PersistenceBackend` contract tests (`persistence_contract.rs`, the adapter test suites) |
 
-## Deliberately unpinned
+## Pinned here, not against krites
 
-Parity is property-level, not bit-exact score equality with krites
-(`tests/oracle/PARITY.md`). Two published-formula choices are implementation
-decisions and stay unpinned: the idf variant for terms appearing in more than
-half the corpus, and the k1/b parameter values. The tokenizer argument value
-model (`TokenizerConfig::args`) is likewise unset; Phase 01 implemented only the
+Parity with krites is property-level, not bit-exact score equality
+(`tests/oracle/PARITY.md`): heurēma does not aim to reproduce krites' scores.
+heurēma's own choices are pinned instead: the `Bm25Index` rustdoc states
+k1 = 1.2, b = 0.75, and the non-negative idf, and `bm25_formula` fails if the
+engine departs from them. The tokenizer argument value model
+(`TokenizerConfig::args`) is unset; Phase 01 implemented only the
 argument-less `Simple` pipeline.

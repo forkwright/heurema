@@ -14,10 +14,13 @@ the engines, as the green definition below requires.
 `cargo test -p heurema --test oracle` is the parity check.
 
 HNSW graph-internal invariants are unit-tested beside the engine in
-`src/hnsw/engine.rs` (clause 4 below). BM25 formula internals are checked here
-only through trait-observable properties. Phase 01's exit also requires an
-independently written BM25 formula reference checked against `Bm25Index`;
-that reference is not in this directory yet, so Phase 01 is not closed.
+`src/hnsw/engine.rs` (clause 4 below). BM25's formula is pinned by
+`bm25_formula`, which checks `Bm25Index` against an independently written `f64`
+BM25 reference that recomputes every score from the raw live corpus over
+seeded insert, replace, and remove workloads: the same IDs must come back,
+ordered as the reference orders them wherever it separates two scores by more
+than the derived `f32` bound, every score must agree within that bound, and
+every perturbed reference must be caught. With it, Phase 01's exit is met.
 
 ## Green definition (Phase 01 exit)
 
@@ -48,9 +51,9 @@ commit:
 
 ## What parity does not mean
 
-- **Not bit-exact score equality with krites.** The idf variant for terms in
-  more than half the corpus and the k1/b constants are implementation
-  choices; `OBSERVATIONS.md` names them unpinned.
+- **Not bit-exact score equality with krites.** The idf variant and the k1/b
+  constants are heurēma's own choices, pinned by the `Bm25Index` rustdoc and
+  `bm25_formula`; they are not claimed to equal krites'.
 - **Not fixture parity with krites.** No krites test content exists in this
   repo (heurema#29: a curated corpus is a compilation; extracted test
   material is derived and banned). Every fixture here is generated fresh from
@@ -58,7 +61,8 @@ commit:
 
 ## Fixture governance
 
-The seeds in `support.rs` are part of the parity contract: changing one
+The seeds in `support.rs`, and the inline workload seeds in `hnsw.rs` and
+`bm25_formula.rs`, are part of the parity contract: changing one
 re-baselines every fixture that draws from it, so a seed change is called out
 in its commit message and re-validated against the recall floor. Fixture
 sizes stay small enough for the suite to run in milliseconds — the recall

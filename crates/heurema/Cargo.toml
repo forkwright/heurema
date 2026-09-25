@@ -35,6 +35,6 @@ workspace = true
 [package.metadata.kanon]
 maturity = "alpha"
 since = "2026-05-25"
-phase = "01"
-phase-description = "Phase 01 engines landed (HNSW graph, Simple-pipeline BM25, RRF, versioned snapshot envelope); open exit item: an independently written BM25 formula reference"
-exit-criteria = "Every oracle case runs live with unweakened assertions; HNSW meets the pinned brute-force recall floor with engine-local graph invariant tests; BM25 agrees with an independently written formula reference; both keep the trait ranking, error, removal, and persistence contracts"
+phase = "02"
+phase-description = "Phase 01 complete: HNSW graph, Simple-pipeline BM25 checked against an independent formula reference, RRF, versioned snapshot envelope; Phase 02 durable retrieval lifecycle next"
+exit-criteria = "A named index has creation, replace/rebuild, atomic publish, reopen/recovery, deletion, and corruption rules; no durable mutation exposes an index version without its canonical identities and provenance mapping; adapter tests cover interruption boundaries and an independent model checks observable state after each operation"
