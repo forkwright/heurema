@@ -12,19 +12,24 @@
 //! [`HeuremaError::Persistence`]: the backend returned them intact, and a
 //! retry would read the same bytes.
 //!
-//! WHY private: a consumer reads these records through the lifecycle's
-//! typed API, never as bytes, so the encodings can change with the format
-//! version without breaking a public type.
+//! WHY private: consumers read these records only through the lifecycle's
+//! typed API, never as bytes. The records embed public types' serde impls
+//! (`IndexRecord`, `IndexState`, `IndexConfig`, `OperationIdentity`,
+//! `MemberEntry`, `MemberChange`), so changing one of those impls is a format
+//! change that bumps [`LIFECYCLE_FORMAT_VERSION`].
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fmt;
+use std::marker::PhantomData;
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use snafu::IntoError;
 
 use super::apply::MemberChange;
 use super::backend::LIFECYCLE_FORMAT_VERSION;
-use super::identity::{IndexIdentity, IndexVersion, OperationIdentity, OperationKey};
+use super::identity::{self, IndexIdentity, IndexVersion, OperationIdentity, OperationKey};
 use super::member::{MemberContent, MemberIdentity, ProvenanceReference, RetentionReference};
 use super::operation::{IndexConfig, LifecycleTransition};
 use super::published::MemberEntry;
@@ -198,7 +203,54 @@ struct RawVersionPayload<M, P> {
     operation: OperationIdentity,
     config: IndexConfig,
     engine: VersionEngine<M>,
+    #[serde(deserialize_with = "unique_member_table")]
     members: BTreeMap<M, MemberEntry<P>>,
+}
+
+/// Decodes a member table, refusing an identity it names twice.
+///
+/// WHY: serde_json's map visitor keeps the last value of a repeated key, so
+/// a table naming one member twice would decode as one entry carrying
+/// whichever provenance came last. This also refuses distinct JSON keys that
+/// read back as one identity.
+fn unique_member_table<'de, D, M, P>(
+    deserializer: D,
+) -> Result<BTreeMap<M, MemberEntry<P>>, D::Error>
+where
+    D: Deserializer<'de>,
+    M: MemberIdentity,
+    P: ProvenanceReference,
+{
+    deserializer.deserialize_map(MemberTable(PhantomData))
+}
+
+/// The map visitor of [`unique_member_table`].
+struct MemberTable<M, P>(PhantomData<fn() -> (M, P)>);
+
+impl<'de, M: MemberIdentity, P: ProvenanceReference> Visitor<'de> for MemberTable<M, P> {
+    type Value = BTreeMap<M, MemberEntry<P>>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a member table naming each member once")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut table = BTreeMap::new();
+        while let Some((id, entry)) = map.next_entry::<M, MemberEntry<P>>()? {
+            match table.entry(id) {
+                Entry::Vacant(slot) => {
+                    slot.insert(entry);
+                }
+                Entry::Occupied(slot) => {
+                    return Err(de::Error::custom(format!(
+                        "member table names {} twice",
+                        identity::reported(&format!("{:?}", slot.key()))
+                    )));
+                }
+            }
+        }
+        Ok(table)
+    }
 }
 
 impl<M: MemberIdentity, P> TryFrom<RawVersionPayload<M, P>> for VersionPayload<M, P> {
@@ -376,7 +428,8 @@ pub(super) fn decode_head<R: RetentionReference>(
     index: &IndexIdentity,
 ) -> Result<IndexRecord<R>, HeuremaError> {
     check_format(bytes)?;
-    let head: HeadBytes<R> = serde_json::from_slice(bytes).map_err(decode_error)?;
+    let head: HeadBytes<R> =
+        serde_json::from_slice(bytes).map_err(|error| decode_error("lifecycle head", error))?;
     if head.record.identity != *index {
         return Err(corrupt(format!(
             "head stored for index {index} names index {}",
@@ -393,7 +446,8 @@ pub(super) fn decode_payload<M: MemberIdentity, P: ProvenanceReference>(
     version: IndexVersion,
 ) -> Result<VersionPayload<M, P>, HeuremaError> {
     check_format(bytes)?;
-    let raw: RawVersionPayload<M, P> = serde_json::from_slice(bytes).map_err(decode_error)?;
+    let raw: RawVersionPayload<M, P> =
+        serde_json::from_slice(bytes).map_err(|error| decode_error("version payload", error))?;
     let payload = VersionPayload::try_from(raw)?;
     if payload.index != *index || payload.version != version {
         return Err(corrupt(format!(
@@ -416,7 +470,8 @@ where
     R: RetentionReference,
 {
     check_format(bytes)?;
-    let record: OperationRecord<M, P, R> = serde_json::from_slice(bytes).map_err(decode_error)?;
+    let record: OperationRecord<M, P, R> =
+        serde_json::from_slice(bytes).map_err(|error| decode_error("operation record", error))?;
     if record.index != *index || record.operation.key != *key {
         return Err(corrupt(format!(
             "operation record stored for key {key} of index {index} is key {} of index {}",
@@ -433,7 +488,8 @@ fn predecessor_of(version: IndexVersion) -> Option<IndexVersion> {
 
 /// Refuses a record whose format version this build does not read.
 fn check_format(bytes: &[u8]) -> Result<(), HeuremaError> {
-    let header: FormatHeader = serde_json::from_slice(bytes).map_err(decode_error)?;
+    let header: FormatHeader = serde_json::from_slice(bytes)
+        .map_err(|error| decode_error("lifecycle record header", error))?;
     if header.format_version != LIFECYCLE_FORMAT_VERSION {
         return UnsupportedSnapshotVersionSnafu {
             found: header.format_version,
@@ -444,9 +500,35 @@ fn check_format(bytes: &[u8]) -> Result<(), HeuremaError> {
     Ok(())
 }
 
+/// Stored bytes of `record` that do not decode.
 #[track_caller]
-fn decode_error(source: serde_json::Error) -> HeuremaError {
-    CorruptSnapshotSnafu.into_error(PersistenceSource::new(source))
+fn decode_error(record: &'static str, source: serde_json::Error) -> HeuremaError {
+    CorruptSnapshotSnafu.into_error(PersistenceSource::new(UndecodableRecord { record, source }))
+}
+
+/// A lifecycle record whose bytes do not decode.
+#[derive(Debug)]
+struct UndecodableRecord {
+    /// Which record: a head, a payload, an operation record, or the header
+    /// every record starts with.
+    record: &'static str,
+    source: serde_json::Error,
+}
+
+impl fmt::Display for UndecodableRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} does not decode: {}",
+            self.record, self.source
+        )
+    }
+}
+
+impl std::error::Error for UndecodableRecord {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
 }
 
 /// A stored record that decodes but contradicts its key or its own
@@ -472,13 +554,24 @@ impl std::error::Error for InconsistentRecord {}
 #[expect(clippy::expect_used, reason = "tests need concise payload fixtures")]
 mod tests {
     use super::*;
-    use crate::lifecycle::test_placeholders::{PlaceholderProvenance, TestMember};
+    use crate::lifecycle::test_placeholders::{
+        PlaceholderProvenance, PlaceholderRetention, TestMember,
+    };
     use crate::{ErrorCategory, HnswConfig, IndexName, OperationDigest, OwnerNamespace};
+
+    type Record = OperationRecord<TestMember, PlaceholderProvenance, PlaceholderRetention>;
 
     fn notes() -> IndexIdentity {
         IndexIdentity::new(
             OwnerNamespace::try_from("example").expect("namespace"),
             IndexName::try_from("notes").expect("name"),
+        )
+    }
+
+    fn drafts() -> IndexIdentity {
+        IndexIdentity::new(
+            OwnerNamespace::try_from("example").expect("namespace"),
+            IndexName::try_from("drafts").expect("name"),
         )
     }
 
@@ -538,6 +631,186 @@ mod tests {
         let mut value = serde_json::to_value(payload).expect("payload encodes");
         tamper(&mut value);
         serde_json::to_vec(&value).expect("tampered payload encodes")
+    }
+
+    fn active_head() -> IndexRecord<PlaceholderRetention> {
+        IndexRecord::new(
+            notes(),
+            IndexConfig::Vector(HnswConfig::new(2)),
+            IndexState::Active {
+                version: version(2),
+            },
+        )
+    }
+
+    fn destroyed_head() -> IndexRecord<PlaceholderRetention> {
+        IndexRecord::new(
+            notes(),
+            IndexConfig::Vector(HnswConfig::new(2)),
+            IndexState::Destroyed {
+                last_version: version(2),
+                retention: PlaceholderRetention(4),
+                operation: OperationKey::try_from("destroy").expect("key"),
+            },
+        )
+    }
+
+    /// An operation record carrying every kind of member change.
+    fn every_change_record() -> Record {
+        let previous = entry(7, 1);
+        OperationRecord::new(
+            notes(),
+            identity(),
+            LifecycleTransition::Rebuild,
+            Some(version(1)),
+            IndexState::Active {
+                version: version(2),
+            },
+            Some(IndexConfig::Vector(HnswConfig::new(3))),
+            vec![
+                MemberChange::Inserted { id: TestMember(1) },
+                MemberChange::Replaced {
+                    id: TestMember(2),
+                    previous: previous.clone(),
+                },
+                MemberChange::Removed {
+                    id: TestMember(3),
+                    previous: previous.clone(),
+                },
+                MemberChange::AbsentOnRemove { id: TestMember(4) },
+                MemberChange::Dropped {
+                    id: TestMember(5),
+                    previous: previous.clone(),
+                },
+                MemberChange::Retired {
+                    id: TestMember(6),
+                    previous,
+                },
+            ],
+        )
+    }
+
+    fn decode_record(
+        bytes: &[u8],
+        index: &IndexIdentity,
+        key: &OperationKey,
+    ) -> Result<Record, HeuremaError> {
+        decode_operation(bytes, index, key)
+    }
+
+    fn assert_unsupported<T: fmt::Debug>(result: Result<T, HeuremaError>, what: &str) {
+        let error = result.expect_err(what);
+        assert!(
+            matches!(
+                error,
+                HeuremaError::UnsupportedSnapshotVersion { found, supported, .. }
+                    if found == LIFECYCLE_FORMAT_VERSION + 1
+                        && supported == LIFECYCLE_FORMAT_VERSION
+            ),
+            "{what}: {error:?}"
+        );
+        assert_eq!(error.category(), ErrorCategory::Unsupported, "{what}");
+    }
+
+    /// `bytes` rewritten as a record from a newer build: the next format
+    /// version and a field this build does not know.
+    fn from_a_newer_build(bytes: &[u8]) -> Vec<u8> {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).expect("record is JSON");
+        value["format_version"] = serde_json::json!(LIFECYCLE_FORMAT_VERSION + 1);
+        value["field_from_a_newer_build"] = serde_json::json!(true);
+        serde_json::to_vec(&value).expect("tampered record encodes")
+    }
+
+    #[test]
+    fn head_marker_and_operation_records_round_trip() {
+        for head in [active_head(), destroyed_head()] {
+            let bytes = encode_head(&head).expect("head encodes");
+            assert_eq!(
+                decode_head::<PlaceholderRetention>(&bytes, &notes()).expect("head decodes"),
+                head
+            );
+        }
+
+        let record = every_change_record();
+        let bytes = encode(&record).expect("record encodes");
+        assert_eq!(
+            decode_record(&bytes, &notes(), &identity().key).expect("record decodes"),
+            record
+        );
+
+        let marker =
+            StagingMarker::new(notes(), version(2), identity(), LifecycleTransition::Insert);
+        let bytes = encode(&marker).expect("marker encodes");
+        assert_eq!(
+            serde_json::from_slice::<StagingMarker>(&bytes).expect("marker decodes"),
+            marker
+        );
+    }
+
+    #[test]
+    fn head_and_operation_records_contradicting_their_key_are_corrupt() {
+        let head = encode_head(&active_head()).expect("head encodes");
+        assert_corrupt(
+            decode_head::<PlaceholderRetention>(&head, &drafts()),
+            "a head stored under another index's key",
+        );
+
+        let record = encode(&every_change_record()).expect("record encodes");
+        assert_corrupt(
+            decode_record(
+                &record,
+                &notes(),
+                &OperationKey::try_from("insert-2").expect("key"),
+            ),
+            "a record stored under another operation's key",
+        );
+        assert_corrupt(
+            decode_record(&record, &drafts(), &identity().key),
+            "a record stored under another index's key",
+        );
+    }
+
+    #[test]
+    fn future_head_and_operation_records_are_unsupported_not_corrupt() {
+        let head = from_a_newer_build(&encode_head(&active_head()).expect("head encodes"));
+        assert_unsupported(
+            decode_head::<PlaceholderRetention>(&head, &notes()),
+            "a head from a newer build",
+        );
+
+        let record = from_a_newer_build(&encode(&every_change_record()).expect("record encodes"));
+        assert_unsupported(
+            decode_record(&record, &notes(), &identity().key),
+            "an operation record from a newer build",
+        );
+    }
+
+    #[test]
+    fn a_member_table_naming_one_identity_twice_is_corrupt() {
+        let bytes = encode(&two_member_payload()).expect("payload encodes");
+        let text = String::from_utf8(bytes).expect("JSON is UTF-8");
+        // WHY splice the text: a `serde_json::Value` cannot hold one key twice.
+        // The member table is the payload's last field, so the payload ends by
+        // closing it and then itself.
+        let Some(open) = text.strip_suffix("}}") else {
+            panic!("the member table closes the payload: {text}");
+        };
+        let spliced = [
+            open,
+            r#","1":{"provenance":999,"introduced":2,"supersedes":null}"#,
+            "}}",
+        ]
+        .concat();
+        let error = decode(spliced.as_bytes()).expect_err("a repeated member is refused");
+        assert!(
+            matches!(error, HeuremaError::CorruptSnapshot { .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.category(), ErrorCategory::Corrupt);
+        assert!(
+            error.to_string().contains("names TestMember(1) twice"),
+            "{error}"
+        );
     }
 
     #[test]

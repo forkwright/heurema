@@ -53,7 +53,8 @@
 //! 1. [`CheckedOperation::check`] runs every check that needs no index state
 //!    (empty or duplicate batches, member identity shape, non-finite
 //!    vectors, configuration validity, family and dimension agreement within
-//!    the operation) and computes the operation's [`OperationIdentity`]: its
+//!    the operation, and whether every consumer value reads back from its
+//!    JSON encoding) and computes the operation's [`OperationIdentity`]: its
 //!    key plus the [`OperationDigest`] of its canonical encoding.
 //! 2. [`CheckedOperation::permit`] takes the index's current record (`None`
 //!    when absent) and refuses a transition the table forbids, an Insert the

@@ -4,6 +4,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use snafu::ensure;
 
 use super::digest;
@@ -16,7 +18,7 @@ use super::record::{IndexRecord, IndexStateKind};
 use crate::HeuremaError;
 use crate::error::{
     DuplicateMemberSnafu, EmptyBatchSnafu, FamilyMismatchSnafu, RecordMismatchSnafu,
-    TransitionNotPermittedSnafu,
+    TransitionNotPermittedSnafu, UnencodableOperationSnafu,
 };
 use crate::fts::require_simple_pipeline;
 use crate::hnsw::{check_config, check_finite, check_vector};
@@ -32,10 +34,11 @@ use crate::hnsw::{check_config, check_finite, check_vector};
 /// 2. a batch that names one member identity twice
 ///    ([`HeuremaError::DuplicateMember`]);
 /// 3. a member identity that does not encode as a string or an integer, or
-///    that does not read back as itself from a JSON object key
-///    ([`HeuremaError::InvalidIdentifier`] of kind
+///    that does not read back as itself from a JSON object key or from a
+///    JSON value ([`HeuremaError::InvalidIdentifier`] of kind
 ///    [`IdentifierKind::MemberIdentity`]), because engine snapshots and the
-///    adapters' JSON encoding key members by identity;
+///    stored records key members by identity and also store identities as
+///    values;
 /// 4. a vector with a NaN or infinite component
 ///    ([`HeuremaError::InvalidVector`]);
 /// 5. a Create or Rebuild configuration the engine refuses: an HNSW
@@ -51,12 +54,16 @@ use crate::hnsw::{check_config, check_finite, check_vector};
 /// 8. an operation whose provenance or retention value has no canonical
 ///    encoding, such as one holding a float or a map keyed by something
 ///    other than strings or integers
-///    ([`HeuremaError::UnencodableOperation`]).
+///    ([`HeuremaError::UnencodableOperation`]);
+/// 9. a provenance or retention value the operation stores that does not
+///    read back as itself from its `serde_json` encoding: each Insert and
+///    Rebuild member's provenance, in ascending identity order, and a
+///    Destroy's retention ([`HeuremaError::UnencodableOperation`]).
 ///
 /// Each step covers the whole batch before the next begins, and per-member
 /// checks visit members in ascending identity order, so the refusal an
 /// operation meets does not depend on the order its members were listed
-/// in. The last step computes the [`OperationDigest`] as documented there.
+/// in. Step 8 computes the [`OperationDigest`] as documented there.
 /// Every refusal here precedes any refusal [`permit`](Self::permit) can
 /// give, because `permit` takes a `CheckedOperation`.
 ///
@@ -162,6 +169,7 @@ impl<M: MemberIdentity, P: ProvenanceReference, R: RetentionReference> CheckedOp
     pub fn check(operation: LifecycleOperation<M, P, R>) -> Result<Self, HeuremaError> {
         check_change(&operation.change)?;
         let digest = digest::operation_digest(&operation)?;
+        check_stored_values(&operation.change)?;
         let identity = OperationIdentity {
             key: operation.key.clone(),
             digest,
@@ -345,7 +353,7 @@ fn member_ids<'a, M, P>(members: &[&'a IndexMember<M, P>]) -> Vec<&'a M> {
 }
 
 /// Steps 2 and 3: no identity twice, and each one a string or an integer
-/// that reads back as itself from a JSON object key.
+/// that reads back as itself from a JSON object key and from a JSON value.
 ///
 /// INVARIANT: `sorted_ids` ascends, so equal identities are adjacent.
 fn check_member_identities<M: MemberIdentity>(sorted_ids: &[&M]) -> Result<(), HeuremaError> {
@@ -361,7 +369,9 @@ fn check_member_identities<M: MemberIdentity>(sorted_ids: &[&M]) -> Result<(), H
         .fail();
     }
     for id in sorted_ids {
-        if let Some(reason) = digest::member_identity_refusal(id).or_else(|| json_key_refusal(*id))
+        if let Some(reason) = digest::member_identity_refusal(id)
+            .or_else(|| json_key_refusal(*id))
+            .or_else(|| json_value_refusal(*id))
         {
             return Err(identity::refusal(
                 IdentifierKind::MemberIdentity,
@@ -400,6 +410,76 @@ fn json_key_refusal<M: MemberIdentity>(id: &M) -> Option<String> {
         Err(error) => Some(format!(
             "cannot be read back from the JSON object {}: {error}",
             identity::reported(&stored)
+        )),
+    }
+}
+
+/// Why `id` does not survive a round trip through a JSON value, or `None`
+/// when it does.
+///
+/// WHY: besides keying maps, heurēma stores member identities as JSON
+/// values: an HNSW engine's entry point and neighbour lists, and each
+/// member change in an operation record. An identity that reads back only
+/// from a key would publish a version that never decodes again.
+fn json_value_refusal<M: MemberIdentity>(id: &M) -> Option<String> {
+    json_round_trip(id)
+        .err()
+        .map(|reason| format!("{reason}; heurēma also stores member identities as JSON values"))
+}
+
+/// Step 9: every provenance or retention value the operation stores reads
+/// back as itself from its JSON encoding.
+///
+/// WHY after the digest: a value the canonical encoder refuses, such as a
+/// float, is reported as having no canonical encoding, the more specific
+/// refusal, before its round trip is tried.
+fn check_stored_values<M, P, R>(change: &IndexChange<M, P, R>) -> Result<(), HeuremaError>
+where
+    M: MemberIdentity,
+    P: ProvenanceReference,
+    R: RetentionReference,
+{
+    let refusal = match change {
+        IndexChange::Insert { members } | IndexChange::Rebuild { members, .. } => {
+            sorted_members(members).into_iter().find_map(|member| {
+                json_round_trip(&member.provenance).err().map(|reason| {
+                    format!(
+                        "provenance of member {} {reason}",
+                        identity::reported(&format!("{:?}", member.id))
+                    )
+                })
+            })
+        }
+        IndexChange::Destroy { retention } => json_round_trip(retention)
+            .err()
+            .map(|reason| format!("retention {reason}")),
+        IndexChange::Create { .. } | IndexChange::Remove { .. } => None,
+    };
+    match refusal {
+        Some(reason) => UnencodableOperationSnafu { reason }.fail(),
+        None => Ok(()),
+    }
+}
+
+/// Why `value` does not read back as itself from the JSON bytes
+/// `serde_json` writes for it, or `Ok` when it does.
+///
+/// WHY the byte path, never `serde_json::Value`: storage writes and reads
+/// bytes, and a `Value` round trip differs from that for a `u128` or for
+/// borrowed data.
+fn json_round_trip<T: Serialize + DeserializeOwned + Eq>(value: &T) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("cannot be written as a JSON value: {error}"))?;
+    // WHY `reported`: the value can be arbitrarily long, and a refusal must
+    // not be.
+    let json = identity::reported(&String::from_utf8_lossy(&bytes));
+    match serde_json::from_slice::<T>(&bytes) {
+        Ok(read) if read == *value => Ok(()),
+        Ok(_) => Err(format!(
+            "reads back from its JSON value {json} as a different value"
+        )),
+        Err(error) => Err(format!(
+            "cannot be read back from its JSON value {json}: {error}"
         )),
     }
 }

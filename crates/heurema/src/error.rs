@@ -113,11 +113,12 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
-    /// WHY: a snapshot whose format version this build does not read may be
-    /// valid for a newer build. It is its own variant, in the `Unsupported`
-    /// category, so a consumer never treats it as corrupt and overwrites it.
+    /// WHY: stored index data (a snapshot or a lifecycle record) whose format
+    /// version this build does not read may be valid for a newer build. It is
+    /// its own variant, in the `Unsupported` category, so a consumer never
+    /// treats it as corrupt and overwrites it.
     #[snafu(display(
-        "index snapshot format version {found} is not supported; this build reads version {supported}"
+        "stored index data format version {found} is not supported; this build reads version {supported}"
     ))]
     UnsupportedSnapshotVersion {
         /// Format version the stored bytes declare.
@@ -130,10 +131,12 @@ pub enum HeuremaError {
     },
 
     /// WHY: stored bytes that cannot be decoded, or that decode into a state
-    /// violating an engine invariant, are corrupt rather than a backend I/O
-    /// failure; a consumer must rebuild them, and retrying the read cannot
-    /// help.
-    #[snafu(display("corrupt index snapshot: {source}"))]
+    /// violating an engine invariant or contradicting the key they were
+    /// stored under, are corrupt rather than a backend I/O failure, and
+    /// retrying the read cannot help. A snapshot is saved again from a
+    /// rebuilt index; a lifecycle record has no repair path yet (see
+    /// [`ErrorCategory::Corrupt`]).
+    #[snafu(display("corrupt stored index data: {source}"))]
     CorruptSnapshot {
         /// Decoder error describing why the bytes were refused.
         source: PersistenceSource,
@@ -277,10 +280,13 @@ pub enum HeuremaError {
     },
 
     /// WHY: an operation's digest is computed over a canonical encoding that
-    /// admits no floating-point numbers and only string or integer map keys.
-    /// A consumer member identity, provenance, or retention value outside
-    /// that grammar is the caller's input to fix, not a storage failure.
-    #[snafu(display("operation has no canonical encoding: {reason}"))]
+    /// admits no floating-point numbers and only string or integer map keys,
+    /// and every consumer value the lifecycle stores must read back from its
+    /// `serde_json` encoding as the value written. A consumer provenance or
+    /// retention value outside that grammar, or one `serde_json` writes but
+    /// cannot read back as itself, is the caller's input to fix, not a
+    /// storage failure.
+    #[snafu(display("operation cannot be encoded: {reason}"))]
     UnencodableOperation {
         /// Why the encoder refused the operation.
         reason: String,
@@ -912,7 +918,7 @@ mod tests {
                     reason: "a map key encodes as a sequence",
                 }
                 .build(),
-                "operation has no canonical encoding: a map key encodes as a sequence",
+                "operation cannot be encoded: a map key encodes as a sequence",
             ),
         ];
         for (error, expected) in cases {

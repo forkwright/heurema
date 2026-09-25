@@ -570,46 +570,83 @@ mod tests {
         );
     }
 
+    /// Forty two-dimensional members: enough that HNSW level draws and
+    /// neighbour pruning depend on the order the members are inserted in.
+    fn order_sensitive_members() -> Vec<IndexMember<TestMember, PlaceholderProvenance>> {
+        (0..40_u64)
+            .map(|i| {
+                let a = i as f32 * 0.7;
+                member(i, i as u32, [a.cos(), a.sin() + (i % 3) as f32 * 0.1])
+            })
+            .collect()
+    }
+
+    fn reversed(
+        members: &[IndexMember<TestMember, PlaceholderProvenance>],
+    ) -> Vec<IndexMember<TestMember, PlaceholderProvenance>> {
+        members.iter().rev().cloned().collect()
+    }
+
+    fn payload_bytes(built: &Built) -> Vec<u8> {
+        super::super::encoding::encode(payload(built)).expect("payload encodes")
+    }
+
     #[test]
     fn member_order_in_a_batch_does_not_change_the_built_version() {
-        let created = step(
-            operation(
-                "create",
-                IndexChange::Create {
-                    config: IndexConfig::Vector(HnswConfig::new(2)),
-                },
-            ),
-            None,
+        let config = IndexConfig::Vector(HnswConfig::new(2));
+        let members = order_sensitive_members();
+
+        // NOTE: the precondition that makes this test able to fail. Inserted
+        // in the caller's order, this fixture builds different engines.
+        let engine_bytes = |members: &[IndexMember<TestMember, PlaceholderProvenance>]| {
+            let mut engine = VersionEngine::empty(&config);
+            for member in members {
+                engine
+                    .insert(member.id.clone(), &member.content)
+                    .expect("insert");
+            }
+            serde_json::to_vec(&engine).expect("engine encodes")
+        };
+        assert_ne!(
+            engine_bytes(&members),
+            engine_bytes(&reversed(&members)),
+            "precondition: the engine depends on insertion order"
         );
-        let members = [
-            member(3, 1, [1.0, 0.0]),
-            member(1, 2, [0.0, 1.0]),
-            member(2, 3, [0.5, 0.5]),
-        ];
-        let forward = step(
-            operation(
-                "insert",
-                IndexChange::Insert {
-                    members: members.to_vec(),
-                },
-            ),
-            Some(&created),
-        );
-        let mut reversed_members = members.to_vec();
-        reversed_members.reverse();
-        let reversed = step(
-            operation(
-                "insert",
-                IndexChange::Insert {
-                    members: reversed_members,
-                },
-            ),
-            Some(&created),
-        );
+
+        let created = step(operation("create", IndexChange::Create { config }), None);
+        let inserted = |members| {
+            step(
+                operation("insert", IndexChange::Insert { members }),
+                Some(&created),
+            )
+        };
         assert_eq!(
-            super::super::encoding::encode(payload(&forward)).expect("encodes"),
-            super::super::encoding::encode(payload(&reversed)).expect("encodes"),
+            payload_bytes(&inserted(members.clone())),
+            payload_bytes(&inserted(reversed(&members))),
             "members apply in identity order, so the payload bytes agree"
+        );
+    }
+
+    #[test]
+    fn member_order_in_a_rebuild_does_not_change_the_built_version() {
+        let (_, second, _) = replaced_once();
+        let members = order_sensitive_members();
+        let rebuilt = |members| {
+            step(
+                operation(
+                    "rebuild",
+                    IndexChange::Rebuild {
+                        config: IndexConfig::Vector(HnswConfig::new(2)),
+                        members,
+                    },
+                ),
+                Some(&second),
+            )
+        };
+        assert_eq!(
+            payload_bytes(&rebuilt(members.clone())),
+            payload_bytes(&rebuilt(reversed(&members))),
+            "a rebuild applies members in identity order, so the payload bytes agree"
         );
     }
 

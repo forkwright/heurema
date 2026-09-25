@@ -51,7 +51,7 @@ use heurema::{
     QuarantinedEntry, RetentionReference, StageWrite, Staged, StagedEntry, TokenizerConfig,
     VectorIndex, WriterLock,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thesauros::ThesaurosBackend;
 
 type TestResult = Result<(), HeuremaError>;
@@ -1166,6 +1166,39 @@ impl Eq for FloatProvenance {}
 
 impl ProvenanceReference for FloatProvenance {}
 
+/// test-local placeholder; heurēma defines no provenance shape. Written as
+/// an integer, read back only from a string: it survives a JSON object key
+/// but not a JSON value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct DigitsMember(u64);
+
+impl Serialize for DigitsMember {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DigitsMember {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let digits = String::deserialize(deserializer)?;
+        digits.parse().map(Self).map_err(serde::de::Error::custom)
+    }
+}
+
+impl MemberIdentity for DigitsMember {}
+
+/// test-local placeholder; heurēma defines no provenance shape. Empty tags
+/// are skipped when written, and with no serde default they cannot be read
+/// back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaggedProvenance {
+    source: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+}
+
+impl ProvenanceReference for TaggedProvenance {}
+
 /// Whether a refusal is the one a case expects.
 type Expectation = fn(&HeuremaError) -> bool;
 
@@ -1240,9 +1273,10 @@ fn stateless_refusals_make_no_backend_call<S: Store>(store: &S) -> TestResult {
     consumer_type_refusals_make_no_backend_call(&counting, &notes)
 }
 
-/// The two stateless refusals that depend on the consumer's own types: a
-/// member identity that encodes as neither a string nor an integer, and a
-/// provenance holding a float.
+/// The stateless refusals that depend on the consumer's own types: a member
+/// identity that encodes as neither a string nor an integer, one that does
+/// not read back from a JSON value, a provenance holding a float, and one
+/// that does not read back as itself.
 fn consumer_type_refusals_make_no_backend_call<B: LifecycleBackend>(
     counting: &Counting<B>,
     notes: &IndexIdentity,
@@ -1284,6 +1318,55 @@ fn consumer_type_refusals_make_no_backend_call<B: LifecycleBackend>(
             members: vec![IndexMember::new(
                 TestMember(3),
                 FloatProvenance(0.5),
+                MemberContent::Vector(vec![0.0, 0.0]),
+            )],
+        },
+    )));
+    assert!(
+        matches!(error, HeuremaError::UnencodableOperation { .. }),
+        "{error:?}"
+    );
+    assert_eq!(counting.counts(), (0, 0), "{error}");
+
+    let digits =
+        IndexLifecycle::<_, DigitsMember, PlaceholderProvenance, PlaceholderRetention>::open(
+            counting,
+        )?;
+    let error = refused(digits.apply(LifecycleOperation::new(
+        notes.clone(),
+        OperationKey::try_from("k")?,
+        IndexChange::Insert {
+            members: vec![IndexMember::new(
+                DigitsMember(3),
+                PlaceholderProvenance(1),
+                MemberContent::Vector(vec![0.0, 0.0]),
+            )],
+        },
+    )));
+    assert!(
+        matches!(
+            error,
+            HeuremaError::InvalidIdentifier {
+                kind: IdentifierKind::MemberIdentity,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(counting.counts(), (0, 0), "{error}");
+
+    let tagged =
+        IndexLifecycle::<_, TestMember, TaggedProvenance, PlaceholderRetention>::open(counting)?;
+    let error = refused(tagged.apply(LifecycleOperation::new(
+        notes.clone(),
+        OperationKey::try_from("k")?,
+        IndexChange::Insert {
+            members: vec![IndexMember::new(
+                TestMember(3),
+                TaggedProvenance {
+                    source: 1,
+                    tags: Vec::new(),
+                },
                 MemberContent::Vector(vec![0.0, 0.0]),
             )],
         },

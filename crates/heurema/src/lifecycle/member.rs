@@ -20,10 +20,12 @@ use crate::SnapshotFamily;
 /// encoding must be injective and consistent with its `Eq` and `Ord`. Two
 /// distinct identities that encode alike would collapse into one map key and
 /// lose a member without an error. It must also read back as itself from a
-/// JSON object key. serde_json writes an integer key as its decimal digits,
-/// so an untagged enum that reads digits back as a string variant breaks
-/// this. Validation refuses an identity that does not encode as a string or
-/// integer, or that does not survive that round trip, with
+/// JSON object key and from a JSON value. serde_json writes an integer key
+/// as its decimal digits, so an untagged enum that reads digits back as a
+/// string variant breaks the first, and a type that reads back only from a
+/// string breaks the second. Validation refuses an identity that does not
+/// encode as a string or integer, or that does not survive either round
+/// trip, with
 /// [`HeuremaError::InvalidIdentifier`](crate::HeuremaError::InvalidIdentifier).
 /// Injectivity and agreement with `Ord` cannot be checked from one value and
 /// are the implementor's to keep.
@@ -49,6 +51,15 @@ pub trait MemberIdentity: Ord + Hash + Clone + fmt::Debug + Serialize + Deserial
 /// serde_json's `RawValue`, are refused with
 /// [`HeuremaError::UnencodableOperation`](crate::HeuremaError::UnencodableOperation).
 ///
+/// A value must also read back as itself, because heurēma stores it through
+/// `serde_json`: `serde_json::from_slice(&serde_json::to_vec(&v)?)` must
+/// equal `v`. A field skipped when serializing needs a serde default, and an
+/// `Option<Option<T>>` loses `Some(None)`. Validation refuses a value that
+/// does not read back with
+/// [`HeuremaError::UnencodableOperation`](crate::HeuremaError::UnencodableOperation).
+/// A stored record nests the value a few levels deep, so its own nesting
+/// must stay well under serde_json's recursion limit of 128.
+///
 /// WHY not blanket-implemented: provenance is required on every member, and
 /// a blanket impl would let `()` or a bare `String` satisfy that requirement
 /// while recording nothing. Without one, the orphan rule makes the consumer
@@ -63,7 +74,8 @@ pub trait ProvenanceReference: Clone + Eq + fmt::Debug + Serialize + Deserialize
 /// record, and never interprets it.
 ///
 /// Contract: as for [`ProvenanceReference`], equal values must serialize
-/// identically, since the Destroy operation's digest hashes this value.
+/// identically, since the Destroy operation's digest hashes this value, and
+/// a value must read back as itself from its JSON encoding.
 ///
 /// WHY not blanket-implemented: physical deletion requires a retention
 /// decision, and a blanket impl would let `()` stand in for one. Without one,
