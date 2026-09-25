@@ -15,6 +15,14 @@ use crate::SnapshotFamily;
 /// member, provenance, or retention shape; it only requires that the
 /// consumer's type can be ordered, hashed, and encoded.
 ///
+/// Contract: an identity must serialize as a single JSON string or integer,
+/// because index engines and version payloads key their maps by it, and its
+/// encoding must be injective and consistent with its `Eq` and `Ord`. Two
+/// distinct identities that encode alike would collapse into one map key and
+/// lose a member without an error. Validation refuses an identity that does
+/// not encode as a string or integer with
+/// [`HeuremaError::InvalidIdentifier`](crate::HeuremaError::InvalidIdentifier).
+///
 /// WHY not blanket-implemented: a blanket impl would let a bare `u64` or
 /// `String` stand in for a member identity. Without one, the orphan rule
 /// stops a consumer implementing this heurēma trait for a type it does not
@@ -180,6 +188,29 @@ impl MemberContent {
 /// # impl ProvenanceReference for PlaceholderProvenance {}
 /// let member = IndexMember::new(
 ///     TestMember(1),
+///     MemberContent::Document("first note".to_owned()),
+/// );
+/// assert_eq!(member.id, TestMember(1));
+/// ```
+///
+/// Passing `None` does not compile either: provenance is required, not
+/// optional. This is the first example with the provenance value replaced by
+/// `None`; it starts compiling if the field ever becomes an `Option`:
+///
+/// ```compile_fail
+/// # use heurema::{IndexMember, MemberContent, MemberIdentity, ProvenanceReference};
+/// # use serde::{Deserialize, Serialize};
+/// # /// test-local placeholder; heurēma defines no provenance shape
+/// # #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// # struct TestMember(u64);
+/// # impl MemberIdentity for TestMember {}
+/// # /// test-local placeholder; heurēma defines no provenance shape
+/// # #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// # struct PlaceholderProvenance(u32);
+/// # impl ProvenanceReference for PlaceholderProvenance {}
+/// let member = IndexMember::<TestMember, PlaceholderProvenance>::new(
+///     TestMember(1),
+///     None,
 ///     MemberContent::Document("first note".to_owned()),
 /// );
 /// assert_eq!(member.id, TestMember(1));

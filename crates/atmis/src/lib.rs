@@ -137,12 +137,20 @@ mod tests {
             br#"{"format_version":1,"family":"Fts","payload":{"alien":true}}"#,
         );
 
-        for name in ["future", "wrong-family"] {
-            assert!(matches!(
-                backend.load_vector_index::<HnswIndex<u64>>(name),
+        assert!(
+            matches!(
+                backend.load_vector_index::<HnswIndex<u64>>("future"),
+                Err(HeuremaError::UnsupportedSnapshotVersion { .. })
+            ),
+            "a future format version is unsupported before the payload decodes"
+        );
+        assert!(
+            matches!(
+                backend.load_vector_index::<HnswIndex<u64>>("wrong-family"),
                 Err(HeuremaError::SnapshotFormat { .. })
-            ));
-        }
+            ),
+            "a wrong family is refused before the payload decodes"
+        );
     }
 
     #[test]
@@ -153,10 +161,13 @@ mod tests {
             "invalid-current",
             br#"{"format_version":1,"family":"Vector","payload":{"alien":true}}"#,
         );
-        assert!(matches!(
-            backend.load_vector_index::<HnswIndex<u64>>("invalid-current"),
-            Err(HeuremaError::Persistence { .. })
-        ));
+        assert!(
+            matches!(
+                backend.load_vector_index::<HnswIndex<u64>>("invalid-current"),
+                Err(HeuremaError::CorruptSnapshot { .. })
+            ),
+            "a current header over an undecodable payload is corrupt"
+        );
 
         let valid = HnswIndex::<u64>::new(HnswConfig::new(2));
         backend

@@ -124,7 +124,7 @@ purpose = "Caller-supplied idempotency key for one lifecycle operation, validate
 crate = "heurema"
 kind = "type"
 name = "OperationIdentity"
-purpose = "An OperationKey plus the OperationDigest of the operation's canonical encoding; no public constructor, because the digest is computed from the operation, never supplied."
+purpose = "An OperationKey plus the OperationDigest of the operation's canonical encoding. No public constructor: a recorded identity can be decoded, but heurema computes the digest of any operation it applies and never accepts a caller-supplied one."
 
 [[interfaces]]
 crate = "heurema"

@@ -97,12 +97,42 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
-    /// WHY: persisted index bytes must name a supported snapshot format and
-    /// index family before an adapter decodes engine state.
-    #[snafu(display("unsupported index snapshot: {reason}"))]
+    /// WHY: persisted index bytes must name the index family the caller
+    /// loads before an adapter decodes engine state; bytes of another family
+    /// under the requested name are refused, never reinterpreted.
+    #[snafu(display("index snapshot does not match the requested family: {reason}"))]
     SnapshotFormat {
         /// Validation failure.
         reason: String,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: a snapshot whose format version this build does not read may be
+    /// valid for a newer build. It is its own variant, in the `Unsupported`
+    /// category, so a consumer never treats it as corrupt and overwrites it.
+    #[snafu(display(
+        "index snapshot format version {found} is not supported; this build reads version {supported}"
+    ))]
+    UnsupportedSnapshotVersion {
+        /// Format version the stored bytes declare.
+        found: u16,
+        /// Format version this build reads and writes.
+        supported: u16,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: stored bytes that cannot be decoded, or that decode into a state
+    /// violating an engine invariant, are corrupt rather than a backend I/O
+    /// failure; a consumer must rebuild them, and retrying the read cannot
+    /// help.
+    #[snafu(display("corrupt index snapshot: {source}"))]
+    CorruptSnapshot {
+        /// Decoder error describing why the bytes were refused.
+        source: PersistenceSource,
         /// Error creation location.
         #[snafu(implicit)]
         location: snafu::Location,
@@ -131,7 +161,8 @@ pub enum HeuremaError {
     },
 
     /// WHY: Storage failures are external to the index algorithms but still
-    /// need to remain in the same error chain for callers.
+    /// need to remain in the same error chain for callers. Stored bytes that
+    /// fail to decode are [`HeuremaError::CorruptSnapshot`], not this variant.
     #[snafu(display("persistence backend error: {source}"))]
     Persistence {
         /// Backend-specific source error.
@@ -179,18 +210,24 @@ pub enum HeuremaError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ErrorCategory {
-    /// The input was refused before any state changed. The same input is
-    /// refused again, so retrying it unchanged cannot succeed.
+    /// The input was refused, on its own or against the current state,
+    /// before anything changed. The same input against the same state is
+    /// refused again.
     Refused,
     /// The named index or snapshot does not exist.
     NotFound,
-    /// The input asks for a capability this build does not implement.
+    /// The input or the stored bytes ask for a capability or format this
+    /// build does not implement, such as an analyzer pipeline beyond `Simple`
+    /// or a snapshot format version newer than this build reads. Stored bytes
+    /// in this category may be valid for a newer build: do not overwrite them.
     Unsupported,
-    /// Stored bytes are present but do not form a state this build accepts,
-    /// such as an unsupported snapshot format version or the wrong family.
+    /// Stored bytes are present but cannot be decoded, violate an engine
+    /// invariant, or belong to another index family. Retrying the read cannot
+    /// succeed; the stored state needs a rebuild.
     Corrupt,
-    /// The persistence backend failed to encode, write, read, or decode
-    /// bytes; the error's source chain carries the backend's cause.
+    /// The persistence backend failed to encode, write, or read bytes; the
+    /// error's source chain carries the backend's cause. Whether a retry can
+    /// succeed depends on that cause.
     Storage,
 }
 
@@ -209,8 +246,10 @@ impl HeuremaError {
             | Self::InvalidKConstant { .. }
             | Self::InvalidIdentifier { .. } => ErrorCategory::Refused,
             Self::IndexNotFound { .. } => ErrorCategory::NotFound,
-            Self::NotYetImplemented { .. } => ErrorCategory::Unsupported,
-            Self::SnapshotFormat { .. } => ErrorCategory::Corrupt,
+            Self::NotYetImplemented { .. } | Self::UnsupportedSnapshotVersion { .. } => {
+                ErrorCategory::Unsupported
+            }
+            Self::SnapshotFormat { .. } | Self::CorruptSnapshot { .. } => ErrorCategory::Corrupt,
             Self::Persistence { .. } => ErrorCategory::Storage,
         }
     }
@@ -235,7 +274,16 @@ mod tests {
             InvalidVectorSnafu { reason: "NaN" }.build(),
             DistanceNotRepresentableSnafu { reason: "overflow" }.build(),
             InvalidHnswConfigSnafu { reason: "zero" }.build(),
-            SnapshotFormatSnafu { reason: "future" }.build(),
+            SnapshotFormatSnafu {
+                reason: "wrong family",
+            }
+            .build(),
+            UnsupportedSnapshotVersionSnafu {
+                found: 2_u16,
+                supported: 1_u16,
+            }
+            .build(),
+            CorruptSnapshotSnafu.into_error(PersistenceSource::new(std::io::Error::other("torn"))),
             InvalidKConstantSnafu {
                 k_constant: -1.0_f32,
             }
@@ -265,6 +313,10 @@ mod tests {
             }
             HeuremaError::InvalidHnswConfig { .. } => ("InvalidHnswConfig", ErrorCategory::Refused),
             HeuremaError::SnapshotFormat { .. } => ("SnapshotFormat", ErrorCategory::Corrupt),
+            HeuremaError::UnsupportedSnapshotVersion { .. } => {
+                ("UnsupportedSnapshotVersion", ErrorCategory::Unsupported)
+            }
+            HeuremaError::CorruptSnapshot { .. } => ("CorruptSnapshot", ErrorCategory::Corrupt),
             HeuremaError::InvalidKConstant { .. } => ("InvalidKConstant", ErrorCategory::Refused),
             HeuremaError::IndexNotFound { .. } => ("IndexNotFound", ErrorCategory::NotFound),
             HeuremaError::Persistence { .. } => ("Persistence", ErrorCategory::Storage),
@@ -287,6 +339,7 @@ mod tests {
         assert_eq!(
             named,
             BTreeSet::from([
+                "CorruptSnapshot",
                 "DimensionMismatch",
                 "DistanceNotRepresentable",
                 "IndexNotFound",
@@ -297,6 +350,7 @@ mod tests {
                 "NotYetImplemented",
                 "Persistence",
                 "SnapshotFormat",
+                "UnsupportedSnapshotVersion",
             ]),
             "every variant is sampled"
         );

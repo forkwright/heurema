@@ -187,7 +187,7 @@ fn save_vector_index_replaces_rather_than_merges() -> Result<(), HeuremaError> {
 
 /// WHY: a probe [`VectorIndex`] with a JSON shape incompatible with
 /// [`HnswIndex`] — a required field `HnswIndex` never emits — proves
-/// [`HeuremaError::Persistence`] is reachable from a genuine decode failure,
+/// [`HeuremaError::CorruptSnapshot`] is reachable from a genuine decode failure,
 /// not only from the not-found path. The snapshot envelope tags only the
 /// format version and index family, not the concrete index type, so loading
 /// the wrong concrete type under a shared name is exactly this failure mode,
@@ -218,16 +218,16 @@ impl VectorIndex for ProbeVectorIndex {
 }
 
 #[test]
-fn load_vector_index_reports_persistence_error_on_shape_mismatch() -> Result<(), HeuremaError> {
+fn load_vector_index_reports_corrupt_snapshot_on_shape_mismatch() -> Result<(), HeuremaError> {
     let backend = AtmisBackend::new();
     backend.save_vector_index("catalog-entry", &HnswIndex::<u64>::new(HnswConfig::new(3)))?;
 
     match backend.load_vector_index::<ProbeVectorIndex>("catalog-entry") {
-        Err(HeuremaError::Persistence { .. }) => {}
+        Err(HeuremaError::CorruptSnapshot { .. }) => {}
         Ok(_) => {
             panic!("HnswIndex bytes must not decode as the incompatible ProbeVectorIndex shape")
         }
-        Err(other) => panic!("expected Persistence, got {other:?}"),
+        Err(other) => panic!("expected CorruptSnapshot, got {other:?}"),
     }
     Ok(())
 }

@@ -35,8 +35,10 @@ disk; every test in this repo can run against it without filesystem I/O. `thesau
 fsyncs (`fjall::PersistMode::SyncAll`) after every write, so a save that returns `Ok` is durable before
 the caller observes it. Both wrap each index in a versioned `SnapshotEnvelope` (format version plus
 `SnapshotFamily`), encode it through `serde_json`, and load through `decode_snapshot_payload`, which
-refuses an unsupported version or the wrong family with `HeuremaError::SnapshotFormat` before the
-index's own decoder runs (PR #51, versioned individual snapshots). A caller-chosen index type needs
+refuses a format version this build does not read (`HeuremaError::UnsupportedSnapshotVersion`) or the
+wrong family (`HeuremaError::SnapshotFormat`) before the index's own decoder runs, and reports bytes
+that do not decode as `HeuremaError::CorruptSnapshot` (PR #51, versioned individual snapshots). Each
+error names its class through `HeuremaError::category()`. A caller-chosen index type needs
 `Serialize` on save and `DeserializeOwned` on load; see `persistence.rs` for why the trait carries that
 bound. Neither crate is named `heurema-*`: see the `WHY` comment on the workspace `Cargo.toml`
 `[workspace.dependencies]` block for why (`NAMING.md` forbids that shape; both are independent GNOMON

@@ -390,8 +390,10 @@ impl fmt::Display for IndexVersion {
 /// WHY: an [`OperationKey`] alone cannot tell a retry from a different
 /// operation reusing the key. Pairing the key with a digest of the
 /// operation's content can. This type is the digest's shape only; nothing in
-/// this crate computes one yet, and no public constructor from raw bytes
-/// exists, so a digest cannot be fabricated outside the parser.
+/// this crate computes one yet. A digest can be parsed from its text form (a
+/// recorded identity must be decodable), but heurēma never accepts a
+/// caller-supplied digest for an operation it applies: it computes the digest
+/// from the operation itself.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 #[repr(transparent)]
@@ -493,7 +495,9 @@ impl fmt::Debug for OperationDigest {
 /// WHY: the same key with the same digest is a replay of one operation; the
 /// same key with a different digest is a different operation reusing a key,
 /// which must be refused rather than applied. There is no public
-/// constructor: the digest is computed from the operation, never supplied.
+/// constructor. A recorded identity can be decoded, but heurēma never takes
+/// an identity from a caller for an operation it applies: it computes the
+/// digest from the operation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]

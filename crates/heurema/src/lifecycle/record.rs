@@ -72,8 +72,10 @@ impl<R> IndexState<R> {
 /// payload is current. The lifecycle contract's "named index record" (index
 /// identity, kind, member identities, provenance, active version or deletion
 /// state) is therefore this head together with the payload of the version it
-/// names. The payload type lands with durable staging; this crate stores
-/// neither yet.
+/// names. For a destroyed index, whose version payloads are removed under a
+/// retention reference, the last member identities and provenance are kept in
+/// the destroy operation's record instead. The payload and operation-record
+/// types land with durable staging; this crate stores none of them yet.
 ///
 /// WHY: members and their provenance belong to a version, not to the index.
 /// A published version never changes, so its member table is fixed with it,

@@ -129,6 +129,39 @@ pub enum LifecycleTransition {
 /// assert_eq!(destroy.transition(), LifecycleTransition::Destroy);
 /// # Ok::<(), heurema::HeuremaError>(())
 /// ```
+///
+/// Nor does `None` for the retention reference: it is required, not optional.
+/// This is the first example with the reference replaced by `None`; it starts
+/// compiling if the field ever becomes an `Option`:
+///
+/// ```compile_fail
+/// # use heurema::{
+/// #     IndexChange, IndexIdentity, IndexName, LifecycleOperation, LifecycleTransition,
+/// #     MemberIdentity, OperationKey, OwnerNamespace, ProvenanceReference, RetentionReference,
+/// # };
+/// # use serde::{Deserialize, Serialize};
+/// # /// test-local placeholder; heurēma defines no provenance shape
+/// # #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// # struct TestMember(u64);
+/// # impl MemberIdentity for TestMember {}
+/// # /// test-local placeholder; heurēma defines no provenance shape
+/// # #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// # struct PlaceholderProvenance(u32);
+/// # impl ProvenanceReference for PlaceholderProvenance {}
+/// # /// test-local placeholder; heurēma defines no provenance shape
+/// # #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// # struct PlaceholderRetention(u32);
+/// # impl RetentionReference for PlaceholderRetention {}
+/// # let index = IndexIdentity::new(OwnerNamespace::try_from("example")?, IndexName::try_from("notes")?);
+/// # let key = OperationKey::try_from("destroy-notes")?;
+/// let destroy = LifecycleOperation::<TestMember, PlaceholderProvenance, PlaceholderRetention>::new(
+///     index,
+///     key,
+///     IndexChange::Destroy { retention: None },
+/// );
+/// assert_eq!(destroy.transition(), LifecycleTransition::Destroy);
+/// # Ok::<(), heurema::HeuremaError>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     deny_unknown_fields,
