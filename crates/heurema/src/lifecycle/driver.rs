@@ -89,9 +89,10 @@ use crate::{HeuremaError, OperationConflictDetail};
 /// [`WriterLock`](crate::WriterLock). [`prepare`](Self::prepare) takes it
 /// after the stateless checks, and the returned [`Prepared`] and [`Staged`]
 /// hold it until they publish or are dropped. Another thread's `prepare`
-/// waits for it. A thread that already holds it, from any lifecycle over
-/// the backend, is refused with [`HeuremaError::WriterHeld`] instead of
-/// waiting for itself. Reads take no lock.
+/// waits for it. A thread that already holds it, through any lifecycle over
+/// the backend or a guard it took itself, is refused with
+/// [`HeuremaError::WriterHeld`] instead of waiting for itself. Reads take no
+/// lock.
 ///
 /// PERF: the writer is held through the build, the encode, and both durable
 /// writes, so mutations on one backend are serialized. Narrowing it needs
@@ -164,9 +165,9 @@ pub struct Prepared<'a, B, M, P, R> {
 
 /// A staged operation, not yet published.
 ///
-/// Dropping it, or a publish that fails or is refused, leaves a version it
-/// staged as orphan staged state: durable, never readable, and refusing
-/// every later mutation of its index with
+/// Dropping it, or a publish that is refused or that fails without taking
+/// effect, leaves a version it staged as orphan staged state: durable, never
+/// readable, and refusing every later mutation of its index with
 /// [`HeuremaError::StagedStateExists`] until recovery clears it.
 #[must_use = "a staged operation is invisible until it is published"]
 pub struct Staged<'a, B, M, P, R> {
@@ -231,9 +232,10 @@ where
     /// stage and publish keeps its orphan staged state, and every mutation
     /// of that index is refused with [`HeuremaError::StagedStateExists`];
     /// other indexes are unaffected. Recovery takes the backend's writer, so
-    /// it waits for, and never quarantines, another lifecycle's live stage;
-    /// on a thread already holding the writer it is refused with
-    /// [`HeuremaError::WriterHeld`].
+    /// it waits for, and never quarantines, another lifecycle's live stage
+    /// (a direct backend caller that does not hold the writer for its whole
+    /// operation has no such protection); on a thread already holding the
+    /// writer it is refused with [`HeuremaError::WriterHeld`].
     ///
     /// # Errors
     ///
@@ -273,8 +275,9 @@ where
     /// - The stateless refusals of [`CheckedOperation::check`], before any
     ///   backend call.
     /// - [`HeuremaError::WriterHeld`] when this thread already holds the
-    ///   backend's writer through a [`Prepared`] or [`Staged`] of any
-    ///   lifecycle over the backend.
+    ///   backend's writer: through a [`Prepared`] or [`Staged`] of any
+    ///   lifecycle over the backend, or through a
+    ///   [`WriterGuard`](crate::WriterGuard) it took itself.
     /// - [`HeuremaError::OperationConflict`] when the key is recorded for
     ///   the index with a different digest.
     /// - [`HeuremaError::CorruptSnapshot`] when the head names a version
@@ -556,8 +559,10 @@ impl<B: LifecycleBackend, M, P, R> Staged<'_, B, M, P, R> {
     /// [`HeuremaError::Persistence`] when the backend fails, in which case
     /// the write may or may not have taken effect. Once the backend reads
     /// its own state, applying the same operation again tells which: a
-    /// publish that took effect replays at the same version, and one that
-    /// did not is refused with [`HeuremaError::StagedStateExists`]. A
+    /// write that took effect replays at the same version. A version publish
+    /// that did not take effect left its staged version behind, so the
+    /// retry is refused with [`HeuremaError::StagedStateExists`]; a Destroy
+    /// that did not take effect staged nothing, so the retry applies it. A
     /// `thesauros` commit failure poisons the database, whose reads may
     /// miss the write until reopen, so reopen the backend before applying
     /// again.

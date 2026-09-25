@@ -3,11 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::Hash;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::HeuremaError;
 use crate::error::NotYetImplementedSnafu;
 use crate::fts::{FtsConfig, FtsIndex};
+use crate::persistence::{UniqueMap, unique_map};
 
 const BM25_K1: f32 = 1.2;
 const BM25_B: f32 = 0.75;
@@ -16,6 +17,7 @@ const SIMPLE_TOKENIZER: &str = "Simple";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DocumentTerms {
+    #[serde(deserialize_with = "unique_map")]
     counts: BTreeMap<String, usize>,
     length: usize,
 }
@@ -92,9 +94,27 @@ pub struct Bm25Index<Id> {
 #[serde(bound(deserialize = "Id: Ord + Deserialize<'de>"))]
 struct RawBm25Index<Id> {
     config: FtsConfig,
+    #[serde(deserialize_with = "unique_map")]
     documents: BTreeMap<Id, DocumentTerms>,
+    #[serde(deserialize_with = "unique_postings")]
     postings: BTreeMap<String, BTreeMap<Id, usize>>,
     total_document_terms: usize,
+}
+
+/// Decodes the postings, refusing a term, or a document within one term's
+/// postings, named twice.
+fn unique_postings<'de, D, Id>(
+    deserializer: D,
+) -> Result<BTreeMap<String, BTreeMap<Id, usize>>, D::Error>
+where
+    D: Deserializer<'de>,
+    Id: Ord + Deserialize<'de>,
+{
+    let postings: BTreeMap<String, UniqueMap<Id, usize>> = unique_map(deserializer)?;
+    Ok(postings
+        .into_iter()
+        .map(|(term, UniqueMap(documents))| (term, documents))
+        .collect())
 }
 
 impl<Id: Ord> TryFrom<RawBm25Index<Id>> for Bm25Index<Id> {

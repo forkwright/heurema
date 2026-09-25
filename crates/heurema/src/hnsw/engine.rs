@@ -67,6 +67,7 @@ pub struct HnswIndex<Id> {
 #[serde(bound(deserialize = "Id: Ord + Clone + Deserialize<'de>"))]
 struct RawHnswIndex<Id> {
     config: HnswConfig,
+    #[serde(deserialize_with = "crate::persistence::unique_map")]
     nodes: BTreeMap<Id, Node<Id>>,
     entry_point: Option<Id>,
     max_level: usize,

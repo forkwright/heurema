@@ -302,11 +302,13 @@ pub enum HeuremaError {
     /// destroying the index beside it would leave a marker no head can
     /// explain, so every later stage or destroy of the index is refused
     /// until recovery moves the staged state to quarantine. Every lifecycle
-    /// over a backend shares its writer
-    /// ([`LifecycleBackend::writer`](crate::LifecycleBackend::writer)), so a
-    /// marker that any lifecycle meets under that writer belongs to no
-    /// running operation. Code that writes without the writer can meet
-    /// another writer's live stage here.
+    /// over a backend holds its writer
+    /// ([`LifecycleBackend::writer`](crate::LifecycleBackend::writer)) from
+    /// its head read through its publish, so among writers that hold it for
+    /// their whole operation a marker met here belongs to no running
+    /// operation. A writer that bypasses the writer, or holds it only around
+    /// each backend call, can meet or cause another writer's live stage
+    /// here, and is still refused with this variant.
     #[snafu(display(
         "index {index} holds interrupted staged state for version {version}; nothing was written"
     ))]
@@ -388,10 +390,13 @@ pub enum HeuremaError {
 
     /// WHY: every lifecycle over one backend shares the backend's writer. A
     /// thread asking for it again while it holds it would wait for itself
-    /// forever, so the request is refused instead. Publishing or dropping
-    /// the operation in hand releases the writer.
+    /// forever, so the request is refused instead. Dropping what holds it (a
+    /// [`WriterGuard`](crate::WriterGuard) from
+    /// [`WriterLock::acquire`](crate::WriterLock::acquire), or a
+    /// [`Prepared`](crate::Prepared) or [`Staged`](crate::Staged)
+    /// operation, which publishing consumes) releases the writer.
     #[snafu(display(
-        "this thread already holds the backend's lifecycle writer through a prepared or staged operation it has not published or dropped; nothing was written"
+        "this thread already holds the backend's lifecycle writer (a WriterGuard, or a Prepared or Staged operation, not yet dropped); nothing was written"
     ))]
     WriterHeld {
         /// Error creation location.
@@ -403,9 +408,12 @@ pub enum HeuremaError {
     /// version after the head it compare-and-sets, so a payload already
     /// under that version with no marker is published by no head and staged
     /// by no marker. The stored state contradicts itself, and recovery
-    /// (which moves only marked state) cannot clear it. A direct backend
-    /// caller also meets this variant when it stages a version number that
-    /// is already published.
+    /// (which moves only marked state) cannot clear it, so the category is
+    /// Corrupt. The backend never decodes a head, so it cannot tell that
+    /// payload from a published one: a direct backend caller that stages a
+    /// version number already published gets this variant too, category
+    /// Corrupt included, over an intact store. That caller reads the head
+    /// again and stages the version after the one it names.
     #[snafu(display(
         "index {index} already stores a payload for version {version} that no staging marker names; nothing was written"
     ))]
@@ -502,7 +510,10 @@ pub enum ErrorCategory {
     /// state contradicts itself. Retrying the read cannot succeed. A
     /// snapshot is saved again from a rebuilt index; a lifecycle record
     /// (head, payload, or operation record) has no repair path yet, and
-    /// recovery and quarantine arrive in a later Phase 02 change.
+    /// recovery and quarantine arrive in a later Phase 02 change. One
+    /// exception: [`HeuremaError::VersionStored`] also reaches a direct
+    /// [`LifecycleBackend`](crate::LifecycleBackend) caller that stages a
+    /// version already published, whose store is intact (see that variant).
     Corrupt,
     /// The persistence backend failed to encode, write, or read bytes; the
     /// error's source chain carries the backend's cause. Whether a retry can
@@ -517,8 +528,11 @@ pub enum ErrorCategory {
     /// The index holds interrupted staged state from an operation that never
     /// published. Staging and destroying that index are refused until
     /// recovery moves the state to quarantine; other indexes are unaffected.
-    /// Every lifecycle over one backend shares the backend's writer, so this
-    /// never names a stage another lifecycle is still running.
+    /// For writers that hold the backend's writer from their head read
+    /// through their publish (every [`IndexLifecycle`](crate::IndexLifecycle)
+    /// does), this never names a stage another operation is still running.
+    /// A live stage of a writer that bypasses the writer, or holds it only
+    /// around each backend call, is reported here too.
     RecoveryRequired,
 }
 
@@ -811,8 +825,8 @@ mod tests {
         let held = WriterHeldSnafu.build();
         assert_eq!(
             held.to_string(),
-            "this thread already holds the backend's lifecycle writer through a prepared or \
-             staged operation it has not published or dropped; nothing was written"
+            "this thread already holds the backend's lifecycle writer (a WriterGuard, or a \
+             Prepared or Staged operation, not yet dropped); nothing was written"
         );
 
         let stored = VersionStoredSnafu {

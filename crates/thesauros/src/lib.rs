@@ -97,7 +97,16 @@ pub struct ThesaurosBackend {
     /// The writer every lifecycle over this backend shares; see
     /// [`LifecycleBackend::writer`].
     writer: WriterLock,
+    /// The largest value a lifecycle write stores: [`MAX_VALUE_LEN`].
+    ///
+    /// WHY a field: the unit tests lower it to reach every write's size
+    /// refusal without allocating a 4 GiB value.
+    value_limit: usize,
 }
+
+/// The largest value fjall stores: `u32::MAX` bytes, the bound its write
+/// batch asserts (`batch::item::Item::new`).
+const MAX_VALUE_LEN: usize = u32::MAX as usize;
 
 /// The five lifecycle keyspaces.
 ///
@@ -123,8 +132,10 @@ struct QuarantineSequenceExhausted;
 /// A lifecycle value larger than fjall stores.
 #[derive(Debug)]
 struct OversizedValue {
+    /// The value, with its article ("a version payload").
     what: &'static str,
     len: usize,
+    limit: usize,
 }
 
 /// A quarantine keyspace entry that does not pair with its marker.
@@ -179,6 +190,7 @@ impl ThesaurosBackend {
             lifecycle,
             commit_lock: Mutex::new(()),
             writer: WriterLock::new(),
+            value_limit: MAX_VALUE_LEN,
         })
     }
 
@@ -252,9 +264,13 @@ impl ThesaurosBackend {
     /// to at most 64 + 1 + 128 + 1 + 128 = 322 bytes (an operation key), far
     /// below fjall's 65535-byte key limit.
     #[track_caller]
-    fn refuse_oversized(what: &'static str, len: usize) -> Result<(), HeuremaError> {
-        if u32::try_from(len).is_err() {
-            Err(persistence(OversizedValue { what, len }))
+    fn refuse_oversized(&self, what: &'static str, len: usize) -> Result<(), HeuremaError> {
+        if len > self.value_limit {
+            Err(persistence(OversizedValue {
+                what,
+                len,
+                limit: self.value_limit,
+            }))
         } else {
             Ok(())
         }
@@ -514,8 +530,8 @@ impl LifecycleBackend for ThesaurosBackend {
         let version_key = storage_key::version(write.index, write.version);
         let staging_key = storage_key::staging(write.index, write.version);
         let operation_key = storage_key::operation(write.index, write.key);
-        Self::refuse_oversized("version payload", write.payload.len())?;
-        Self::refuse_oversized("staging marker", write.marker.len())?;
+        self.refuse_oversized("a version payload", write.payload.len())?;
+        self.refuse_oversized("a staging marker", write.marker.len())?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -535,8 +551,8 @@ impl LifecycleBackend for ThesaurosBackend {
         let version_key = storage_key::version(write.index, write.version);
         let staging_key = storage_key::staging(write.index, write.version);
         let operation_key = storage_key::operation(write.index, write.key);
-        Self::refuse_oversized("head record", write.head.len())?;
-        Self::refuse_oversized("operation record", write.operation.len())?;
+        self.refuse_oversized("a head record", write.head.len())?;
+        self.refuse_oversized("an operation record", write.operation.len())?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -562,8 +578,8 @@ impl LifecycleBackend for ThesaurosBackend {
         let head_key = storage_key::head(write.index);
         let prefix = storage_key::index_prefix(write.index);
         let operation_key = storage_key::operation(write.index, write.key);
-        Self::refuse_oversized("head record", write.head.len())?;
-        Self::refuse_oversized("operation record", write.operation.len())?;
+        self.refuse_oversized("a head record", write.head.len())?;
+        self.refuse_oversized("an operation record", write.operation.len())?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -624,7 +640,7 @@ impl LifecycleBackend for ThesaurosBackend {
         let staging_key = storage_key::staging(write.index, write.version);
         // NOTE: the payload moved beside the marker is already stored, so it
         // fits; only the marker bytes come from the caller.
-        Self::refuse_oversized("staging marker", write.marker.len())?;
+        self.refuse_oversized("a staging marker", write.marker.len())?;
 
         let _commit = self.commit_lock()?;
         let snapshot = self.db.snapshot();
@@ -792,9 +808,9 @@ impl fmt::Display for OversizedValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "thesauros cannot store a {} of {} bytes: fjall stores values of at most 4294967295 \
-             bytes; nothing was written",
-            self.what, self.len
+            "thesauros cannot store {} of {} bytes: fjall stores values of at most {} bytes; \
+             nothing was written",
+            self.what, self.len, self.limit
         )
     }
 }
@@ -901,13 +917,15 @@ mod tests {
 
     #[test]
     #[cfg(target_pointer_width = "64")]
-    fn values_fjall_cannot_store_are_refused_before_any_write() {
-        // WHY the function, not a write: a 4 GiB value is not allocated in a
-        // unit test; every write calls this before it takes the commit lock.
+    fn refuse_oversized_accepts_u32_max_and_refuses_one_byte_more() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = ThesaurosBackend::open(dir.path()).expect("open");
         let largest = u32::MAX as usize;
-        ThesaurosBackend::refuse_oversized("version payload", largest)
+        backend
+            .refuse_oversized("a version payload", largest)
             .expect("fjall stores a value of u32::MAX bytes");
-        let error = ThesaurosBackend::refuse_oversized("version payload", largest + 1)
+        let error = backend
+            .refuse_oversized("a version payload", largest + 1)
             .expect_err("a value one byte past the limit is refused");
         assert!(
             matches!(error, HeuremaError::Persistence { .. }),
@@ -917,6 +935,137 @@ mod tests {
             error.to_string(),
             "persistence backend error: thesauros cannot store a version payload of 4294967296 \
              bytes: fjall stores values of at most 4294967295 bytes; nothing was written"
+        );
+    }
+
+    /// Every lifecycle state [`every_lifecycle_write_refuses_an_oversized_value_before_writing`]
+    /// compares before and after its refused writes.
+    fn observed(backend: &ThesaurosBackend, indexes: &[&IndexIdentity]) -> Vec<String> {
+        let mut observed = vec![
+            format!("{:?}", backend.list_heads().expect("heads")),
+            format!("{:?}", backend.list_staged().expect("staged")),
+            format!("{:?}", backend.list_quarantined().expect("quarantined")),
+        ];
+        for index in indexes {
+            observed.push(format!(
+                "{:?}",
+                backend.list_operations(index).expect("operations")
+            ));
+            observed.push(format!(
+                "{:?}",
+                backend
+                    .read_version(index, IndexVersion::FIRST)
+                    .expect("version")
+            ));
+        }
+        observed
+    }
+
+    #[test]
+    fn every_lifecycle_write_refuses_an_oversized_value_before_writing() {
+        const LIMIT: usize = 8;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut backend = ThesaurosBackend::open(dir.path()).expect("open");
+        // WHY: the same check against a limit a unit test can exceed; the
+        // limit itself is pinned by the test above.
+        backend.value_limit = LIMIT;
+        let identity = |name: &str| {
+            IndexIdentity::new(
+                OwnerNamespace::try_from("example").expect("namespace"),
+                IndexName::try_from(name).expect("name"),
+            )
+        };
+        let (staged, published, fresh) =
+            (identity("staged"), identity("published"), identity("fresh"));
+        let key = |text: &str| OperationKey::try_from(text).expect("key");
+        let v1 = IndexVersion::FIRST;
+        let fits = b"fits";
+        let oversized = [b'x'; LIMIT + 1];
+        backend
+            .stage(StageWrite::new(&staged, v1, &key("s"), None, fits, fits))
+            .expect("stage");
+        backend
+            .stage(StageWrite::new(&published, v1, &key("p"), None, fits, fits))
+            .expect("stage");
+        backend
+            .publish(PublishWrite::new(
+                &published,
+                v1,
+                &key("p"),
+                None,
+                fits,
+                fits,
+                fits,
+            ))
+            .expect("publish");
+        let before = observed(&backend, &[&staged, &published, &fresh]);
+
+        // NOTE: each write is valid but for its one oversized value, so a
+        // write that skipped its size check would succeed or meet another
+        // refusal, never this one.
+        let stage = |marker: &[u8], payload: &[u8]| {
+            backend.stage(StageWrite::new(
+                &fresh,
+                v1,
+                &key("f"),
+                None,
+                marker,
+                payload,
+            ))
+        };
+        let publish = |head: &[u8], operation: &[u8]| {
+            backend.publish(PublishWrite::new(
+                &staged,
+                v1,
+                &key("s"),
+                None,
+                fits,
+                head,
+                operation,
+            ))
+        };
+        let destroy = |head: &[u8], operation: &[u8]| {
+            backend.destroy(DestroyWrite::new(
+                &published,
+                &key("d"),
+                fits,
+                head,
+                operation,
+                &[v1],
+            ))
+        };
+        let writes = [
+            ("a version payload", stage(fits, &oversized)),
+            ("a staging marker", stage(&oversized, fits)),
+            ("a head record", publish(&oversized, fits)),
+            ("an operation record", publish(fits, &oversized)),
+            ("a head record", destroy(&oversized, fits)),
+            ("an operation record", destroy(fits, &oversized)),
+            (
+                "a staging marker",
+                backend.quarantine(QuarantineWrite::new(&staged, v1, &oversized)),
+            ),
+        ];
+        for (index, (what, result)) in writes.into_iter().enumerate() {
+            let error = result.expect_err("an oversized value is refused");
+            assert!(
+                matches!(error, HeuremaError::Persistence { .. }),
+                "write {index}: {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "persistence backend error: thesauros cannot store {what} of {} bytes: fjall \
+                     stores values of at most {LIMIT} bytes; nothing was written",
+                    LIMIT + 1
+                ),
+                "write {index}"
+            );
+        }
+        assert_eq!(
+            observed(&backend, &[&staged, &published, &fresh]),
+            before,
+            "the refused writes changed nothing"
         );
     }
 }

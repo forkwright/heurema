@@ -58,6 +58,68 @@ fn corrupt_snapshot_relationships_are_rejected_at_decode() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// The snapshot text of `original` with the map at `pointer` written out
+/// entry by entry, and, when `repeat` is set, its first entry written again,
+/// with the same value, after its last.
+///
+/// WHY text: a `serde_json::Value` map cannot hold one key twice.
+fn with_map_spliced(
+    original: &Value,
+    pointer: &str,
+    repeat: bool,
+) -> Result<String, serde_json::Error> {
+    const SPLICE: &str = "spliced map";
+    let mut value = original.clone();
+    let Some(field) = value.pointer_mut(pointer) else {
+        panic!("invalid test pointer {pointer}");
+    };
+    let Value::Object(map) = field.take() else {
+        panic!("{pointer} is not a map");
+    };
+    let mut entries = map
+        .iter()
+        .map(|(key, value)| Ok(format!("{}:{value}", serde_json::to_string(key)?)))
+        .collect::<Result<Vec<String>, serde_json::Error>>()?;
+    let Some(first) = entries.first().cloned() else {
+        panic!("{pointer} is empty");
+    };
+    if repeat {
+        entries.push(first);
+    }
+    *field = json!(SPLICE);
+    let text = serde_json::to_string(&value)?;
+    let quoted = serde_json::to_string(SPLICE)?;
+    assert_eq!(text.matches(&quoted).count(), 1, "{text}");
+    Ok(text.replacen(&quoted, &format!("{{{}}}", entries.join(",")), 1))
+}
+
+#[test]
+fn a_snapshot_map_naming_one_key_twice_is_rejected_at_decode()
+-> Result<(), Box<dyn std::error::Error>> {
+    let original = serde_json::to_value(populated()?)?;
+    for pointer in [
+        "/documents",
+        "/documents/1/counts",
+        "/postings",
+        "/postings/alpha",
+    ] {
+        // NOTE: the repeat has the first entry's own value, so without the
+        // refusal it would decode as the original index; the splice alone
+        // does.
+        let spliced = with_map_spliced(&original, pointer, false)?;
+        serde_json::from_str::<Bm25Index<u64>>(&spliced)?;
+        let repeated = with_map_spliced(&original, pointer, true)?;
+        let Err(error) = serde_json::from_str::<Bm25Index<u64>>(&repeated) else {
+            panic!("accepted a repeated key at {pointer}");
+        };
+        assert!(
+            error.to_string().contains("names one key twice"),
+            "{pointer}: {error}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn simple_pipeline_defines_case_and_unicode_tokenization() -> Result<(), HeuremaError> {
     let mut index = Bm25Index::new(FtsConfig::simple());

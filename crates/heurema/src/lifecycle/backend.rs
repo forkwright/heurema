@@ -103,8 +103,9 @@ pub const LIFECYCLE_FORMAT_VERSION: u16 = 1;
 /// [`quarantine`](LifecycleBackend::quarantine); nothing ever deletes it.
 /// Recovery arrives with the lifecycle driver's reopen path in a later
 /// Phase 02 change; until then an orphan blocks its index. With every writer
-/// holding the backend's [`writer`](LifecycleBackend::writer), a marker
-/// exists outside any operation only when that operation was interrupted.
+/// holding the backend's [`writer`](LifecycleBackend::writer) from its head
+/// read through its publish, a marker exists outside any operation only
+/// when that operation was interrupted.
 ///
 /// The methods after [`destroy`](LifecycleBackend::destroy) serve recovery
 /// and audit. They are declared together with the rest so a later recovery
@@ -127,22 +128,27 @@ pub trait LifecycleBackend {
     ///
     /// [`IndexLifecycle`](crate::IndexLifecycle) takes it after an
     /// operation's stateless checks, and [`Prepared`](crate::Prepared) and
-    /// [`Staged`](crate::Staged) hold it until publish or drop. So on one
-    /// backend at most one operation is between its head read and its
-    /// publish at a time, whichever lifecycle or thread runs it, and any
-    /// staging marker met under the writer is interrupted state.
+    /// [`Staged`](crate::Staged) hold it until publish or drop. So among
+    /// writers that hold it that way, at most one operation on the backend
+    /// is between its head read and its publish at a time, whichever
+    /// lifecycle or thread runs it, and a staging marker any of them meets
+    /// is interrupted state.
     ///
     /// An adapter owns exactly one [`WriterLock`] and returns it on every
     /// call. A wrapper returns the lock of the backend it wraps; the pointer
     /// impls do.
     ///
-    /// Direct callers of [`stage`](Self::stage), [`publish`](Self::publish),
-    /// [`destroy`](Self::destroy), or [`quarantine`](Self::quarantine) should
-    /// hold it. Without it the structural checks still hold, but a
-    /// [`HeuremaError::StagedStateExists`] the caller causes or meets may
-    /// name a live stage, and a `quarantine` it runs may move a live stage,
-    /// whose publish then fails with [`HeuremaError::StagedStateMissing`],
-    /// having published nothing.
+    /// A direct caller of [`stage`](Self::stage), [`publish`](Self::publish),
+    /// [`destroy`](Self::destroy), or [`quarantine`](Self::quarantine) holds
+    /// one guard from its head read through its last write, as `Prepared`
+    /// and `Staged` do. A guard held only around each call is not enough:
+    /// another operation can run between the calls. A caller that does not
+    /// hold it for its whole operation keeps the structural checks, but a
+    /// [`HeuremaError::StagedStateExists`] it causes or meets may name a live
+    /// stage, still categorised
+    /// [`RecoveryRequired`](crate::ErrorCategory::RecoveryRequired), and a
+    /// `quarantine` it runs may move a live stage, whose publish then fails
+    /// with [`HeuremaError::StagedStateMissing`], having published nothing.
     fn writer(&self) -> &WriterLock;
 
     /// The head record of `index`, or `None` when the index has no head.

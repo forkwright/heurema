@@ -13,17 +13,19 @@
 //! retry would read the same bytes.
 //!
 //! WHY private: consumers read these records only through the lifecycle's
-//! typed API, never as bytes. The records embed public types' serde impls
-//! (`IndexRecord`, `IndexState`, `IndexConfig`, `OperationIdentity`,
-//! `MemberEntry`, `MemberChange`), so changing one of those impls is a format
-//! change that bumps [`LIFECYCLE_FORMAT_VERSION`].
+//! typed API, never as bytes. The records embed the serde impls of every
+//! public type they contain: `IndexRecord`, `IndexState`, `IndexConfig`
+//! (with `HnswConfig` and `FtsConfig`), `OperationIdentity`, `MemberEntry`,
+//! `MemberChange`, `LifecycleTransition`, the identifiers (`IndexIdentity`,
+//! `IndexVersion`, `OperationKey`, `OperationDigest`), and the engines
+//! `HnswIndex` and `Bm25Index`, whose serde the snapshot envelope shares.
+//! Changing any of those impls is a format change that bumps
+//! [`LIFECYCLE_FORMAT_VERSION`], and for an engine or its configuration
+//! also [`SNAPSHOT_FORMAT_VERSION`](crate::SNAPSHOT_FORMAT_VERSION).
 
 use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
 use std::fmt;
-use std::marker::PhantomData;
 
-use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::IntoError;
 
@@ -38,6 +40,7 @@ use crate::error::{
     CorruptSnapshotSnafu, FamilyMismatchSnafu, UnencodableOperationSnafu,
     UnsupportedSnapshotVersionSnafu,
 };
+use crate::persistence::UniqueKeys;
 use crate::{
     Bm25Index, FtsIndex, HeuremaError, HnswIndex, PersistenceSource, SnapshotFamily, VectorIndex,
 };
@@ -207,12 +210,9 @@ struct RawVersionPayload<M, P> {
     members: BTreeMap<M, MemberEntry<P>>,
 }
 
-/// Decodes a member table, refusing an identity it names twice.
-///
-/// WHY: serde_json's map visitor keeps the last value of a repeated key, so
-/// a table naming one member twice would decode as one entry carrying
-/// whichever provenance came last. This also refuses distinct JSON keys that
-/// read back as one identity.
+/// Decodes a member table, refusing an identity it names twice, as
+/// [`unique_map`](crate::persistence::unique_map) refuses a repeated key in
+/// the engine's maps, with a refusal that names the member.
 fn unique_member_table<'de, D, M, P>(
     deserializer: D,
 ) -> Result<BTreeMap<M, MemberEntry<P>>, D::Error>
@@ -221,36 +221,15 @@ where
     M: MemberIdentity,
     P: ProvenanceReference,
 {
-    deserializer.deserialize_map(MemberTable(PhantomData))
-}
-
-/// The map visitor of [`unique_member_table`].
-struct MemberTable<M, P>(PhantomData<fn() -> (M, P)>);
-
-impl<'de, M: MemberIdentity, P: ProvenanceReference> Visitor<'de> for MemberTable<M, P> {
-    type Value = BTreeMap<M, MemberEntry<P>>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a member table naming each member once")
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut table = BTreeMap::new();
-        while let Some((id, entry)) = map.next_entry::<M, MemberEntry<P>>()? {
-            match table.entry(id) {
-                Entry::Vacant(slot) => {
-                    slot.insert(entry);
-                }
-                Entry::Occupied(slot) => {
-                    return Err(de::Error::custom(format!(
-                        "member table names {} twice",
-                        identity::reported(&format!("{:?}", slot.key()))
-                    )));
-                }
-            }
-        }
-        Ok(table)
-    }
+    deserializer.deserialize_map(UniqueKeys::new(
+        "a member table naming each member once",
+        |id: &M| {
+            format!(
+                "member table names {} twice",
+                identity::reported(&format!("{id:?}"))
+            )
+        },
+    ))
 }
 
 impl<M: MemberIdentity, P> TryFrom<RawVersionPayload<M, P>> for VersionPayload<M, P> {
@@ -811,6 +790,50 @@ mod tests {
             error.to_string().contains("names TestMember(1) twice"),
             "{error}"
         );
+    }
+
+    /// The payload text with the engine's node map replaced by `nodes`, the
+    /// text of a JSON object.
+    ///
+    /// WHY splice the text: a `serde_json::Value` cannot hold one key twice.
+    fn with_engine_nodes(
+        payload: &VersionPayload<TestMember, PlaceholderProvenance>,
+        nodes: &str,
+    ) -> String {
+        const SPLICE: &str = "\"spliced nodes\"";
+        let mut value = serde_json::to_value(payload).expect("payload encodes");
+        value["engine"]["Vector"]["nodes"] = serde_json::json!("spliced nodes");
+        let text = serde_json::to_string(&value).expect("payload encodes");
+        assert_eq!(text.matches(SPLICE).count(), 1, "{text}");
+        text.replacen(SPLICE, nodes, 1)
+    }
+
+    #[test]
+    fn an_engine_map_naming_one_key_twice_is_corrupt() {
+        let payload = two_member_payload();
+        let value = serde_json::to_value(&payload).expect("payload encodes");
+        let nodes = &value["engine"]["Vector"]["nodes"];
+        let (first, second) = (&nodes["1"], &nodes["2"]);
+        assert!(first.is_object() && second.is_object(), "{nodes}");
+        let mut tampered = first.clone();
+        tampered["vector"] = serde_json::json!([0.6, 0.8]);
+
+        // NOTE: the splice itself decodes; only the repeated node is refused.
+        // Without the refusal the later copy of node 1 would win, and its
+        // vector is one the engine never indexed.
+        let spliced = with_engine_nodes(&payload, &format!(r#"{{"1":{first},"2":{second}}}"#));
+        decode(spliced.as_bytes()).expect("the spliced payload decodes");
+        let repeated = with_engine_nodes(
+            &payload,
+            &format!(r#"{{"1":{first},"2":{second},"1":{tampered}}}"#),
+        );
+        let error = decode(repeated.as_bytes()).expect_err("a repeated node is refused");
+        assert!(
+            matches!(error, HeuremaError::CorruptSnapshot { .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.category(), ErrorCategory::Corrupt);
+        assert!(error.to_string().contains("names one key twice"), "{error}");
     }
 
     #[test]

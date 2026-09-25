@@ -111,8 +111,12 @@
 //! operation publishes or is dropped. Another thread's operation waits for
 //! it; a thread that already holds it is refused with
 //! [`HeuremaError::WriterHeld`](crate::HeuremaError::WriterHeld) instead of
-//! waiting for itself. A staged version that any operation meets is
-//! therefore interrupted state, never another operation's live stage.
+//! waiting for itself. Among writers that hold it for their whole operation,
+//! as every lifecycle does, a staged version that one meets is therefore
+//! interrupted state, never another operation's live stage. Code that
+//! writes through the backend directly and bypasses the writer, or holds it
+//! only around each call, can meet or leave a live stage that is reported
+//! the same way.
 //!
 //! The publish point is one atomic backend write. Before it, readers see
 //! the old version; after it, they see the new head, the operation record,

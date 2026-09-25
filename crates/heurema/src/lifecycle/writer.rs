@@ -10,8 +10,9 @@ use crate::error::WriterHeldSnafu;
 
 /// The writer every lifecycle over one backend shares, returned by
 /// [`LifecycleBackend::writer`](super::LifecycleBackend::writer). It guards
-/// no data: holding it means no other operation on the backend is between
-/// its head read and its publish.
+/// no data: holding it means no other operation that holds it for its whole
+/// run, as every lifecycle operation does, is between its head read and its
+/// publish.
 ///
 /// [`acquire`](Self::acquire) waits while another thread holds the writer,
 /// and refuses, with [`HeuremaError::WriterHeld`], a thread that already

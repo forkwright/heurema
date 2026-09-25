@@ -652,6 +652,19 @@ fn provenance_that_does_not_read_back_as_itself_is_refused() -> Result<(), Heure
     for result in empty_tags {
         assert_unencodable(&refused(result), "provenance of member TestMember(1)");
     }
+    // NOTE: with two refused provenances, the lower identity is reported in
+    // either listing order.
+    for members in [
+        vec![tagged(2, &[], point()), tagged(1, &[], point())],
+        vec![tagged(1, &[], point()), tagged(2, &[], point())],
+    ] {
+        assert_unencodable(
+            &refused(check(ChangeOf::<TestMember, TaggedProvenance>::Insert {
+                members,
+            })),
+            "provenance of member TestMember(1) ",
+        );
+    }
     check(ChangeOf::<TestMember, TaggedProvenance>::Insert {
         members: vec![tagged(1, &["a"], point())],
     })?;

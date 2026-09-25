@@ -31,13 +31,13 @@
 //! `PersistMode::SyncAll` to fjall's buffered default would pass these tests,
 //! because a clean drop flushes the journal. Both are review items. That a
 //! thread blocks while another holds the writer is proven in heurēma's
-//! writer unit tests (`crates/heurema/src/lifecycle/writer.rs`); the
-//! cross-thread cases here check only the order operations take effect in.
+//! writer unit tests (`crates/heurema/src/lifecycle/writer.rs`) and, through
+//! the lifecycle, by the case whose other thread the writer must count as
+//! waiting, with its operation unreturned, before the live stage publishes.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 
@@ -1215,6 +1215,18 @@ struct TaggedProvenance {
 
 impl ProvenanceReference for TaggedProvenance {}
 
+/// test-local placeholder; heurēma defines no retention shape. Empty tags
+/// are skipped when written, and with no serde default they cannot be read
+/// back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaggedRetention {
+    source: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+}
+
+impl RetentionReference for TaggedRetention {}
+
 /// Whether a refusal is the one a case expects.
 type Expectation = fn(&HeuremaError) -> bool;
 
@@ -1290,9 +1302,9 @@ fn stateless_refusals_make_no_backend_call<S: Store>(store: &S) -> TestResult {
 }
 
 /// The stateless refusals that depend on the consumer's own types: a member
-/// identity that encodes as neither a string nor an integer, one that does
-/// not read back from a JSON value, a provenance holding a float, and one
-/// that does not read back as itself.
+/// identity that encodes as neither a string nor an integer and a
+/// provenance holding a float here, then the values that do not read back
+/// as themselves.
 fn consumer_type_refusals_make_no_backend_call<B: LifecycleBackend>(
     counting: &Counting<B>,
     notes: &IndexIdentity,
@@ -1344,6 +1356,17 @@ fn consumer_type_refusals_make_no_backend_call<B: LifecycleBackend>(
     );
     assert_eq!(counting.counts(), (0, 0), "{error}");
 
+    consumer_value_refusals_make_no_backend_call(counting, notes)
+}
+
+/// The stateless refusals of consumer values that do not read back from
+/// their JSON encoding: a member identity read back only from a key, a
+/// provenance, and a Destroy's retention.
+fn consumer_value_refusals_make_no_backend_call<B: LifecycleBackend>(
+    counting: &Counting<B>,
+    notes: &IndexIdentity,
+) -> TestResult {
+    counting.reset();
     let digits =
         IndexLifecycle::<_, DigitsMember, PlaceholderProvenance, PlaceholderRetention>::open(
             counting,
@@ -1389,6 +1412,24 @@ fn consumer_type_refusals_make_no_backend_call<B: LifecycleBackend>(
     )));
     assert!(
         matches!(error, HeuremaError::UnencodableOperation { .. }),
+        "{error:?}"
+    );
+    assert_eq!(counting.counts(), (0, 0), "{error}");
+
+    let retained =
+        IndexLifecycle::<_, TestMember, PlaceholderProvenance, TaggedRetention>::open(counting)?;
+    let error = refused(retained.apply(LifecycleOperation::new(
+        notes.clone(),
+        OperationKey::try_from("k")?,
+        IndexChange::Destroy {
+            retention: TaggedRetention {
+                source: 1,
+                tags: Vec::new(),
+            },
+        },
+    )));
+    assert!(
+        matches!(error, HeuremaError::UnencodableOperation { ref reason, .. } if reason.starts_with("retention ")),
         "{error:?}"
     );
     assert_eq!(counting.counts(), (0, 0), "{error}");
@@ -1919,6 +1960,31 @@ fn joined<T>(result: thread::Result<T>) -> T {
     }
 }
 
+/// Waits until another thread waits for `backend`'s writer, failing if
+/// `finished` reports that thread's operation first. Returns early when
+/// that thread stopped without a result, whose error its join reports.
+///
+/// WHY the writer's `Debug` form: it is the public view of how many threads
+/// wait in `WriterLock::acquire`, so this needs no sleep and no timeout.
+fn await_writer_waiter<B: LifecycleBackend, T: fmt::Debug>(
+    backend: &B,
+    finished: &mpsc::Receiver<T>,
+) {
+    loop {
+        match finished.try_recv() {
+            Ok(result) => {
+                panic!("the other thread's operation returned during the live stage: {result:?}")
+            }
+            Err(mpsc::TryRecvError::Disconnected) => return,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if format!("{:?}", backend.writer()).contains("waiting: 1") {
+            return;
+        }
+        thread::yield_now();
+    }
+}
+
 fn a_lifecycle_on_another_thread_waits_for_a_live_stage_then_builds_on_it<S: Store>(
     store: &S,
 ) -> TestResult {
@@ -1930,38 +1996,32 @@ fn a_lifecycle_on_another_thread_waits_for_a_live_stage_then_builds_on_it<S: Sto
         &first,
         insert(&notes, "a", vec![vector(3, 30, &[1.0, 1.0])])?,
     )?;
-    let publishing = AtomicBool::new(false);
-    let (started, waiter_started) = mpsc::channel();
+    let (finish, finished) = mpsc::channel();
 
-    let (published, waited) = thread::scope(|scope| {
+    let (published, waiter) = thread::scope(|scope| {
         let waiter = scope.spawn(|| {
             let second = Lifecycle::open(&backend)?;
-            let operation = insert(&notes, "b", vec![vector(4, 40, &[0.0, 1.0])])?;
+            let applied = second.apply(insert(&notes, "b", vec![vector(4, 40, &[0.0, 1.0])])?);
             assert!(
-                started.send(()).is_ok(),
+                finish.send(applied).is_ok(),
                 "the main thread stopped listening"
             );
-            let applied = second.apply(operation);
-            Ok::<_, HeuremaError>((applied, publishing.load(Ordering::SeqCst)))
+            Ok::<_, HeuremaError>(())
         });
-        assert!(
-            waiter_started.recv().is_ok(),
-            "the other thread stopped before it applied"
-        );
-        // WHY: set before the publish, so a result the other thread returns
-        // before the publish began would carry `false`.
-        publishing.store(true, Ordering::SeqCst);
+        // NOTE: the other thread is now blocked in `acquire`, not merely
+        // scheduled late: its operation has not returned, and the writer
+        // counts it as waiting.
+        await_writer_waiter(&backend, &finished);
         let published = staged.publish();
         (published, joined(waiter.join()))
     });
 
     assert_receipt(&published?, 3, false);
-    let (applied, saw_publishing) = waited?;
+    waiter?;
+    let applied = finished
+        .recv()
+        .map_err(|_| storage_error(std::io::Error::other("the other thread sent no result")))?;
     assert_receipt(&applied?, 4, false);
-    assert!(
-        saw_publishing,
-        "the other thread's operation returned only after the live stage published"
-    );
     let (active, members) = observe(&first, &notes)?;
     assert_eq!(active, 4);
     let ids: Vec<u64> = members.iter().map(|(id, _, _)| *id).collect();
@@ -2180,14 +2240,16 @@ fn lifecycles_that_bypass_the_shared_writer_still_never_both_publish<S: Store>(
     let a = ready(first.prepare(insert(&notes, "a", member(3))?)?);
     let b = ready(second.prepare(insert(&notes, "b", member(4))?)?);
     let a = a.stage()?;
-    // NOTE: no category is asserted. `StagedStateExists` means interrupted
-    // state only to writers that hold the shared writer, and `second`
-    // bypasses it.
+    // NOTE: `second` bypasses the shared writer, so it meets `first`'s live
+    // stage, reported as `StagedStateExists` like an orphan. The category
+    // says interrupted state only to writers that hold the writer for their
+    // whole operation, as its documentation says.
     let error = refused(b.stage());
     assert!(
         matches!(error, HeuremaError::StagedStateExists { version, .. } if version.get() == 3),
         "unexpected {error:?}"
     );
+    assert_eq!(error.category(), ErrorCategory::RecoveryRequired);
     assert_receipt(&a.publish()?, 3, false);
 
     // NOTE: Both prepare from version 3; the first publishes, and the second's

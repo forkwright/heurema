@@ -180,7 +180,7 @@ purpose = "Marker trait a consumer implements on its own provenance newtype; nev
 crate = "heurema"
 kind = "type"
 name = "CheckedOperation"
-purpose = "A LifecycleOperation that passed every stateless check, in a documented order (empty batch, duplicate member, member identity shape, non-finite vector, configuration validity through the engines' own checks, Rebuild member family and dimension, mixed-family Insert, canonical encodability), plus its OperationIdentity. check() is a pure function; permit(current record) applies the permission table and the checks against the current configuration and yields a ValidatedOperation."
+purpose = "A LifecycleOperation that passed every stateless check, in a documented order (empty batch, duplicate member, member identity shape and its JSON key and value read-back, non-finite vector, configuration validity through the engines' own checks, Rebuild member family and dimension, mixed-family Insert, canonical encodability, then a JSON read-back of every stored provenance, in identity order, and of a Destroy's retention, refused as UnencodableOperation), plus its OperationIdentity. check() is a pure function; permit(current record) applies the permission table and the checks against the current configuration and yields a ValidatedOperation."
 
 [[interfaces]]
 crate = "heurema"

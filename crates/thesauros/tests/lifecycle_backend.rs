@@ -4,14 +4,23 @@
 //! reopen the fjall database.
 //!
 //! WHY one suite for both: the lifecycle driver must behave the same on
-//! either adapter, so each refusal, each write's all-or-nothing visibility
-//! to a concurrent reader, each write's exclusion of a racing writer, and
-//! each listing order are pinned once and checked against both. Values here
-//! are opaque byte strings on purpose: the
-//! adapter contract is independent of heurēma's record encodings
-//! (`crates/heurema/src/lifecycle/encoding.rs`), which
+//! either adapter, so each refusal, each listing order, the all-or-nothing
+//! visibility of each stage, publish, destroy, and quarantine to a
+//! concurrent reader, and each such write's exclusion of racing writers are
+//! pinned once and checked against both. Values here are opaque byte
+//! strings on purpose: the adapter contract is independent of heurēma's
+//! record encodings (`crates/heurema/src/lifecycle/encoding.rs`), which
 //! `lifecycle_conformance.rs` exercises through the driver, and the backend
 //! must not care what the bytes say.
+//!
+//! WHY the concurrent cases prove more on `thesauros` than on `atmis`: a
+//! reader or a racing writer can land inside a write that was split in two
+//! only while the write is suspended between its halves. Each `thesauros`
+//! batch is an fsync wide, so a split there is caught on every run. An
+//! `atmis` write takes nanoseconds, so the same split is almost never
+//! caught; its atomicity rests on one `MutexGuard` held across each write's
+//! checks and effects, which is a review item. On `atmis` these cases check
+//! only that a correct write never shows a torn state.
 //!
 //! WHY the durability cases drop the backend before reading: dropping it
 //! closes the only handle on the fjall database, so the reopened backend
@@ -348,9 +357,15 @@ fn stage_never_overwrites_an_existing_version_or_marker(
         "refusals wrote nothing"
     );
 
-    // NOTE: a published version has no marker, only its payload; staging that
-    // version number again must still be refused, and the payload no marker
-    // names is corrupt stored state, not interrupted state.
+    // NOTE: a published version has no marker, only its payload, and staging
+    // that version number again must still be refused. The store is
+    // consistent: the head names that payload. The adapter never decodes a
+    // head, so it cannot tell a published payload from one no head or marker
+    // names, which is how a lifecycle caller meets this refusal (it stages
+    // the version after the head it compare-and-sets, so only damage puts a
+    // payload there). `VersionStored` is categorised for that caller, as
+    // Corrupt; a direct caller that stages a published version gets the same
+    // category, as the variant's documentation says.
     let head = publish_staged(backend, &notes, 1, None)?;
     let before = observe(backend, &[&notes])?;
     let error = refusal(backend.stage(StageWrite::new(
@@ -866,12 +881,16 @@ fn listings_come_back_in_storage_key_order(backend: &dyn LifecycleBackend) -> Te
 
 /// Rounds of [`a_concurrent_reader_never_sees_part_of_a_write`].
 ///
-/// WHY this few: on `thesauros` each round is nine `SyncAll` writes, each an
-/// fsync, and the reader polls thousands of times inside each one.
+/// WHY this few: on `thesauros` each round is eleven `SyncAll` writes, each
+/// an fsync, and the reader polls thousands of times inside each one.
 const READER_ROUNDS: usize = 25;
 
 /// Versions each reader round stages and publishes before it destroys.
 const READER_VERSIONS: u64 = 4;
+
+/// The version each reader round stages after [`READER_VERSIONS`] and
+/// quarantines instead of publishing.
+const QUARANTINED_VERSION: u64 = READER_VERSIONS + 1;
 
 /// The index of reader round `round`.
 fn race_index(round: usize) -> Result<IndexIdentity, HeuremaError> {
@@ -886,11 +905,38 @@ fn active_version(index: &IndexIdentity, head: Option<&[u8]>) -> Option<u64> {
 
 const DESTROYED: &[u8] = b"destroyed";
 
+/// The quarantine entry of `index`'s [`QUARANTINED_VERSION`], if any.
+fn quarantine_entry(
+    backend: &dyn LifecycleBackend,
+    index: &IndexIdentity,
+) -> Result<Option<QuarantinedEntry>, HeuremaError> {
+    let quarantined = version(QUARANTINED_VERSION)?;
+    Ok(backend
+        .list_quarantined()?
+        .into_iter()
+        .find(|entry| entry.index == *index && entry.version == quarantined))
+}
+
+/// Whether `index`'s staged version is [`QUARANTINED_VERSION`].
+fn quarantined_version_marked(
+    backend: &dyn LifecycleBackend,
+    index: &IndexIdentity,
+) -> Result<bool, HeuremaError> {
+    Ok(backend
+        .read_staging(index)?
+        .is_some_and(|(staged, _)| staged.get() == QUARANTINED_VERSION))
+}
+
 /// One reader poll of `round`'s index: the invariants every atomic write
 /// keeps, each read in an order where the fact that implies the other is
 /// read first, so a correct adapter never fails one (a read sees every
-/// write that returned before it began).
-fn poll(backend: &dyn LifecycleBackend, round: usize) -> Result<Vec<String>, HeuremaError> {
+/// write that returned before it began). `quarantine_staged` says the
+/// round's stage of [`QUARANTINED_VERSION`] returned before the poll began.
+fn poll(
+    backend: &dyn LifecycleBackend,
+    round: usize,
+    quarantine_staged: bool,
+) -> Result<Vec<String>, HeuremaError> {
     let index = race_index(round)?;
     let mut violations = Vec::new();
 
@@ -914,6 +960,14 @@ fn poll(backend: &dyn LifecycleBackend, round: usize) -> Result<Vec<String>, Heu
                 "{index}: head v{value} beside a marker for v{staged}"
             ));
         }
+        // I6: a payload the head names leaves only in the destroy write that
+        // marks the head destroyed, and the head is read again after the
+        // payload.
+        if backend.read_version(&index, version(value)?)?.is_none()
+            && backend.read_head(&index)?.as_deref() != Some(DESTROYED)
+        {
+            violations.push(format!("{index}: head v{value} without its payload"));
+        }
     }
     if head.as_deref() == Some(DESTROYED) {
         // I3: destroy writes the head and its record and removes every
@@ -931,14 +985,16 @@ fn poll(backend: &dyn LifecycleBackend, round: usize) -> Result<Vec<String>, Heu
             }
         }
     }
-    // I4: stage writes a marker and its payload together, and only destroy
-    // removes the payload.
+    // I4: stage writes a marker and its payload together. Only quarantine,
+    // which removes the marker in the same write, or destroy, which runs
+    // only once no marker is left, removes the payload; so the marker is
+    // read again after the payload.
     if let Some((staged, marker)) = backend.read_staging(&index)? {
         if marker != bytes("marker", &index, staged.get()) {
             violations.push(format!("{index}: marker of v{staged} holds other bytes"));
         }
         if backend.read_version(&index, staged)?.is_none()
-            && backend.read_head(&index)?.as_deref() != Some(DESTROYED)
+            && backend.read_staging(&index)? == Some((staged, marker))
         {
             violations.push(format!("{index}: marker of v{staged} without its payload"));
         }
@@ -961,84 +1017,153 @@ fn poll(backend: &dyn LifecycleBackend, round: usize) -> Result<Vec<String>, Heu
             }
         }
     }
+    // I7: quarantine creates an entry and removes the marker and payload it
+    // moved in one write, and nothing stages that version again.
+    if let Some(entry) = quarantine_entry(backend, &index)? {
+        if entry.marker != bytes("marker", &index, QUARANTINED_VERSION)
+            || entry.payload != Some(bytes("payload", &index, QUARANTINED_VERSION))
+        {
+            violations.push(format!(
+                "{index}: quarantine entry of v{QUARANTINED_VERSION} holds other bytes"
+            ));
+        }
+        if quarantined_version_marked(backend, &index)? {
+            violations.push(format!(
+                "{index}: quarantine entry of v{QUARANTINED_VERSION} beside its marker"
+            ));
+        }
+        if backend
+            .read_version(&index, version(QUARANTINED_VERSION)?)?
+            .is_some()
+        {
+            violations.push(format!(
+                "{index}: quarantine entry of v{QUARANTINED_VERSION} beside its payload"
+            ));
+        }
+    }
+    // I8: once staged, the quarantined version's marker stays until the
+    // write that creates its quarantine entry.
+    if quarantine_staged
+        && !quarantined_version_marked(backend, &index)?
+        && quarantine_entry(backend, &index)?.is_none()
+    {
+        violations.push(format!(
+            "{index}: v{QUARANTINED_VERSION} left staging without reaching quarantine"
+        ));
+    }
     Ok(violations)
 }
 
 /// Stages and publishes [`READER_VERSIONS`] versions of `round`'s index,
-/// then destroys it.
-fn write_round(backend: &dyn LifecycleBackend, round: usize) -> TestResult {
+/// stages [`QUARANTINED_VERSION`] and quarantines it, then destroys the
+/// index. Once that stage returns, `quarantine_staged` holds `round + 1`.
+fn write_round(
+    backend: &dyn LifecycleBackend,
+    round: usize,
+    quarantine_staged: &AtomicUsize,
+) -> TestResult {
     let index = race_index(round)?;
     let mut head: Option<Vec<u8>> = None;
     for value in 1..=READER_VERSIONS {
         head = Some(publish_version(backend, &index, value, head.as_deref())?);
     }
+    let head = head.unwrap_or_default();
+    stage_version(backend, &index, QUARANTINED_VERSION, Some(&head))?;
+    quarantine_staged.store(round + 1, Ordering::SeqCst);
+    backend.quarantine(QuarantineWrite::new(
+        &index,
+        version(QUARANTINED_VERSION)?,
+        &bytes("marker", &index, QUARANTINED_VERSION),
+    ))?;
     let versions = (1..=READER_VERSIONS)
         .map(version)
         .collect::<Result<Vec<_>, _>>()?;
     backend.destroy(DestroyWrite::new(
         &index,
         &key("destroy")?,
-        head.as_deref().unwrap_or_default(),
+        &head,
         DESTROYED,
         b"destroy",
         &versions,
     ))
 }
 
-/// Writes every reader round, publishing `current` before each, and waits
+/// What the writer tells the reader of [`a_concurrent_reader_never_sees_part_of_a_write`].
+#[derive(Default)]
+struct ReaderProgress {
+    /// The round being written.
+    current: AtomicUsize,
+    /// The last round whose [`QUARANTINED_VERSION`] stage returned, plus
+    /// one; zero before any.
+    quarantine_staged: AtomicUsize,
+    /// Polls the reader has finished.
+    polls: AtomicUsize,
+    /// Set once the writer is done.
+    done: AtomicBool,
+    /// Set once the reader has stopped.
+    reader_exited: AtomicBool,
+}
+
+/// Writes every reader round, publishing its number before each, and waits
 /// after each until the reader has polled since the round began.
-fn write_rounds(
-    backend: &dyn LifecycleBackend,
-    current: &AtomicUsize,
-    polls: &AtomicUsize,
-    reader_exited: &AtomicBool,
-) -> TestResult {
+fn write_rounds(backend: &dyn LifecycleBackend, progress: &ReaderProgress) -> TestResult {
     for round in 0..READER_ROUNDS {
-        let polled = polls.load(Ordering::SeqCst);
-        current.store(round, Ordering::SeqCst);
-        write_round(backend, round)?;
+        let polled = progress.polls.load(Ordering::SeqCst);
+        progress.current.store(round, Ordering::SeqCst);
+        write_round(backend, round, &progress.quarantine_staged)?;
         // WHY: every round is polled at least once, without a sleep.
-        while polls.load(Ordering::SeqCst) == polled && !reader_exited.load(Ordering::SeqCst) {
+        while progress.polls.load(Ordering::SeqCst) == polled
+            && !progress.reader_exited.load(Ordering::SeqCst)
+        {
             thread::yield_now();
         }
     }
     Ok(())
 }
 
+/// Polls until the writer is done, and returns how many violations and
+/// backend errors it met, with the first ten.
+///
+/// WHY no panic here: a violation or a backend error is collected, so the
+/// writer is never left waiting for a dead reader.
+fn read_rounds(backend: &dyn LifecycleBackend, progress: &ReaderProgress) -> (usize, Vec<String>) {
+    let mut violations = Vec::new();
+    let mut seen = 0_usize;
+    while !progress.done.load(Ordering::SeqCst) {
+        let round = progress.current.load(Ordering::SeqCst);
+        let staged = progress.quarantine_staged.load(Ordering::SeqCst) == round + 1;
+        match poll(backend, round, staged) {
+            Ok(found) => {
+                seen += found.len();
+                violations.extend(found.into_iter().take(10 - violations.len().min(10)));
+            }
+            Err(error) => {
+                seen += 1;
+                if violations.len() < 10 {
+                    violations.push(format!("backend error: {error}"));
+                }
+            }
+        }
+        progress.polls.fetch_add(1, Ordering::SeqCst);
+    }
+    progress.reader_exited.store(true, Ordering::SeqCst);
+    (seen, violations)
+}
+
+/// A reader polls while a writer stages, publishes, quarantines, and
+/// destroys, and never sees part of a write.
+///
+/// A split write is caught only while it is suspended between its halves
+/// long enough for a poll to land, which each `thesauros` batch is (an
+/// fsync) and an `atmis` write is not; see the module documentation.
 fn a_concurrent_reader_never_sees_part_of_a_write<B: LifecycleBackend + Sync>(
     backend: &B,
 ) -> TestResult {
-    let current = AtomicUsize::new(0);
-    let polls = AtomicUsize::new(0);
-    let done = AtomicBool::new(false);
-    let reader_exited = AtomicBool::new(false);
-
-    let (written, violations) = thread::scope(|scope| {
-        let reader = scope.spawn(|| {
-            // WHY no panic here: a violation or a backend error is collected,
-            // so the writer is never left waiting for a dead reader.
-            let mut violations = Vec::new();
-            let mut seen = 0_usize;
-            while !done.load(Ordering::SeqCst) {
-                match poll(backend, current.load(Ordering::SeqCst)) {
-                    Ok(found) => {
-                        seen += found.len();
-                        violations.extend(found.into_iter().take(10 - violations.len().min(10)));
-                    }
-                    Err(error) => {
-                        seen += 1;
-                        if violations.len() < 10 {
-                            violations.push(format!("backend error: {error}"));
-                        }
-                    }
-                }
-                polls.fetch_add(1, Ordering::SeqCst);
-            }
-            reader_exited.store(true, Ordering::SeqCst);
-            (seen, violations)
-        });
-        let written = write_rounds(backend, &current, &polls, &reader_exited);
-        done.store(true, Ordering::SeqCst);
+    let progress = ReaderProgress::default();
+    let (written, (seen, first)) = thread::scope(|scope| {
+        let reader = scope.spawn(|| read_rounds(backend, &progress));
+        let written = write_rounds(backend, &progress);
+        progress.done.store(true, Ordering::SeqCst);
         let violations = match reader.join() {
             Ok(violations) => violations,
             Err(panic) => std::panic::resume_unwind(panic),
@@ -1046,12 +1171,11 @@ fn a_concurrent_reader_never_sees_part_of_a_write<B: LifecycleBackend + Sync>(
         (written, violations)
     });
     written?;
-    let (seen, first) = violations;
     assert_eq!(
         seen,
         0,
         "{seen} violations over {} polls; first: {first:#?}",
-        polls.load(Ordering::SeqCst)
+        progress.polls.load(Ordering::SeqCst)
     );
     Ok(())
 }
@@ -1105,6 +1229,9 @@ fn sole_winner(results: Vec<TestResult>, lost: fn(&HeuremaError) -> bool, what: 
     }
 }
 
+/// Racing stages, publishes, destroys, and quarantines of one index each
+/// admit exactly one writer; see the module documentation for what this
+/// proves on each adapter.
 fn racing_writers_on_one_index_admit_exactly_one<B: LifecycleBackend + Sync>(
     backend: &B,
 ) -> TestResult {
@@ -1176,10 +1303,43 @@ fn racing_writers_on_one_index_admit_exactly_one<B: LifecycleBackend + Sync>(
             |error| matches!(error, HeuremaError::HeadChanged { .. }),
             &format!("round {round} destroy"),
         );
-        assert_eq!(
-            backend.read_head(&index)?,
-            Some(own("destroyed", destroyer))
+        let destroyed = own("destroyed", destroyer);
+        assert_eq!(backend.read_head(&index)?, Some(destroyed.clone()));
+
+        // NOTE: the backend reads a destroyed head as opaque bytes like any
+        // other, so a version staged against it gives the quarantine race a
+        // marker to move.
+        let v2 = version(2)?;
+        let (marker, payload) = (bytes("marker", &index, 2), bytes("payload", &index, 2));
+        backend.stage(StageWrite::new(
+            &index,
+            v2,
+            &key("q")?,
+            Some(&destroyed),
+            &marker,
+            &payload,
+        ))?;
+        let quarantined = race(|_| backend.quarantine(QuarantineWrite::new(&index, v2, &marker)));
+        sole_winner(
+            quarantined,
+            |error| matches!(error, HeuremaError::StagedStateMissing { version, .. } if version.get() == 2),
+            &format!("round {round} quarantine"),
         );
+        let entries: Vec<QuarantinedEntry> = backend
+            .list_quarantined()?
+            .into_iter()
+            .filter(|entry| entry.index == index)
+            .collect();
+        let [entry] = entries.as_slice() else {
+            panic!("round {round}: exactly one quarantine entry, not {entries:?}");
+        };
+        assert_eq!(
+            (entry.version, &entry.marker, &entry.payload),
+            (v2, &marker, &Some(payload)),
+            "round {round}"
+        );
+        assert_eq!(backend.read_staging(&index)?, None);
+        assert_eq!(backend.read_version(&index, v2)?, None);
     }
     Ok(())
 }
