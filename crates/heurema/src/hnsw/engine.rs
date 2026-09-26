@@ -67,6 +67,7 @@ pub struct HnswIndex<Id> {
 #[serde(bound(deserialize = "Id: Ord + Clone + Deserialize<'de>"))]
 struct RawHnswIndex<Id> {
     config: HnswConfig,
+    #[serde(deserialize_with = "crate::persistence::unique_map")]
     nodes: BTreeMap<Id, Node<Id>>,
     entry_point: Option<Id>,
     max_level: usize,
@@ -220,6 +221,15 @@ impl<Id> HnswIndex<Id> {
 
     fn validate_vector(&self, vector: &[f32]) -> Result<(), HeuremaError> {
         check_vector(&self.config, vector)
+    }
+
+    /// The identities of every node in the graph, in ascending order.
+    ///
+    /// WHY: a lifecycle version payload pairs this engine with a member
+    /// table, and its decoder refuses a payload whose engine holds a member
+    /// the table does not name, or the reverse.
+    pub(crate) fn member_ids(&self) -> impl Iterator<Item = &Id> {
+        self.nodes.keys()
     }
 }
 

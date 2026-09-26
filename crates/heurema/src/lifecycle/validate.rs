@@ -4,6 +4,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use snafu::ensure;
 
 use super::digest;
@@ -16,7 +18,7 @@ use super::record::{IndexRecord, IndexStateKind};
 use crate::HeuremaError;
 use crate::error::{
     DuplicateMemberSnafu, EmptyBatchSnafu, FamilyMismatchSnafu, RecordMismatchSnafu,
-    TransitionNotPermittedSnafu,
+    TransitionNotPermittedSnafu, UnencodableOperationSnafu,
 };
 use crate::fts::require_simple_pipeline;
 use crate::hnsw::{check_config, check_finite, check_vector};
@@ -32,10 +34,11 @@ use crate::hnsw::{check_config, check_finite, check_vector};
 /// 2. a batch that names one member identity twice
 ///    ([`HeuremaError::DuplicateMember`]);
 /// 3. a member identity that does not encode as a string or an integer, or
-///    that does not read back as itself from a JSON object key
-///    ([`HeuremaError::InvalidIdentifier`] of kind
+///    that does not read back as itself from a JSON object key or from a
+///    JSON value ([`HeuremaError::InvalidIdentifier`] of kind
 ///    [`IdentifierKind::MemberIdentity`]), because engine snapshots and the
-///    adapters' JSON encoding key members by identity;
+///    stored records key members by identity and also store identities as
+///    values;
 /// 4. a vector with a NaN or infinite component
 ///    ([`HeuremaError::InvalidVector`]);
 /// 5. a Create or Rebuild configuration the engine refuses: an HNSW
@@ -51,12 +54,17 @@ use crate::hnsw::{check_config, check_finite, check_vector};
 /// 8. an operation whose provenance or retention value has no canonical
 ///    encoding, such as one holding a float or a map keyed by something
 ///    other than strings or integers
+///    ([`HeuremaError::UnencodableOperation`]);
+/// 9. a provenance or retention value the operation stores that nests more
+///    than 64 levels deep in JSON, or that does not read back as itself from
+///    its `serde_json` encoding: each Insert and Rebuild member's
+///    provenance, in ascending identity order, and a Destroy's retention
 ///    ([`HeuremaError::UnencodableOperation`]).
 ///
 /// Each step covers the whole batch before the next begins, and per-member
 /// checks visit members in ascending identity order, so the refusal an
 /// operation meets does not depend on the order its members were listed
-/// in. The last step computes the [`OperationDigest`] as documented there.
+/// in. Step 8 computes the [`OperationDigest`] as documented there.
 /// Every refusal here precedes any refusal [`permit`](Self::permit) can
 /// give, because `permit` takes a `CheckedOperation`.
 ///
@@ -162,6 +170,7 @@ impl<M: MemberIdentity, P: ProvenanceReference, R: RetentionReference> CheckedOp
     pub fn check(operation: LifecycleOperation<M, P, R>) -> Result<Self, HeuremaError> {
         check_change(&operation.change)?;
         let digest = digest::operation_digest(&operation)?;
+        check_stored_values(&operation.change)?;
         let identity = OperationIdentity {
             key: operation.key.clone(),
             digest,
@@ -331,8 +340,10 @@ where
 /// `members` in ascending identity order.
 ///
 /// WHY: every per-member check walks this order, so which member a refusal
-/// names does not depend on the order the caller listed them in.
-fn sorted_members<M: Ord, P>(members: &[IndexMember<M, P>]) -> Vec<&IndexMember<M, P>> {
+/// names does not depend on the order the caller listed them in; building a
+/// version applies members in the same order, so the engine a batch builds
+/// does not depend on it either.
+pub(super) fn sorted_members<M: Ord, P>(members: &[IndexMember<M, P>]) -> Vec<&IndexMember<M, P>> {
     let mut sorted: Vec<&IndexMember<M, P>> = members.iter().collect();
     sorted.sort_unstable_by(|left, right| left.id.cmp(&right.id));
     sorted
@@ -343,7 +354,7 @@ fn member_ids<'a, M, P>(members: &[&'a IndexMember<M, P>]) -> Vec<&'a M> {
 }
 
 /// Steps 2 and 3: no identity twice, and each one a string or an integer
-/// that reads back as itself from a JSON object key.
+/// that reads back as itself from a JSON object key and from a JSON value.
 ///
 /// INVARIANT: `sorted_ids` ascends, so equal identities are adjacent.
 fn check_member_identities<M: MemberIdentity>(sorted_ids: &[&M]) -> Result<(), HeuremaError> {
@@ -359,7 +370,9 @@ fn check_member_identities<M: MemberIdentity>(sorted_ids: &[&M]) -> Result<(), H
         .fail();
     }
     for id in sorted_ids {
-        if let Some(reason) = digest::member_identity_refusal(id).or_else(|| json_key_refusal(*id))
+        if let Some(reason) = digest::member_identity_refusal(id)
+            .or_else(|| json_key_refusal(*id))
+            .or_else(|| json_value_refusal(*id))
         {
             return Err(identity::refusal(
                 IdentifierKind::MemberIdentity,
@@ -400,6 +413,126 @@ fn json_key_refusal<M: MemberIdentity>(id: &M) -> Option<String> {
             identity::reported(&stored)
         )),
     }
+}
+
+/// Why `id` does not survive a round trip through a JSON value, or `None`
+/// when it does.
+///
+/// WHY: besides keying maps, heurēma stores member identities as JSON
+/// values: an HNSW engine's entry point and neighbour lists, and each
+/// member change in an operation record. An identity that reads back only
+/// from a key would publish a version that never decodes again.
+fn json_value_refusal<M: MemberIdentity>(id: &M) -> Option<String> {
+    json_round_trip(id)
+        .err()
+        .map(|reason| format!("{reason}; heurēma also stores member identities as JSON values"))
+}
+
+/// Step 9: every provenance or retention value the operation stores reads
+/// back as itself from its JSON encoding.
+///
+/// WHY after the digest: a value the canonical encoder refuses, such as a
+/// float, is reported as having no canonical encoding, the more specific
+/// refusal, before its round trip is tried.
+fn check_stored_values<M, P, R>(change: &IndexChange<M, P, R>) -> Result<(), HeuremaError>
+where
+    M: MemberIdentity,
+    P: ProvenanceReference,
+    R: RetentionReference,
+{
+    let refusal = match change {
+        IndexChange::Insert { members } | IndexChange::Rebuild { members, .. } => {
+            sorted_members(members).into_iter().find_map(|member| {
+                json_round_trip(&member.provenance).err().map(|reason| {
+                    format!(
+                        "provenance of member {} {reason}",
+                        identity::reported(&format!("{:?}", member.id))
+                    )
+                })
+            })
+        }
+        IndexChange::Destroy { retention } => json_round_trip(retention)
+            .err()
+            .map(|reason| format!("retention {reason}")),
+        IndexChange::Create { .. } | IndexChange::Remove { .. } => None,
+    };
+    match refusal {
+        Some(reason) => UnencodableOperationSnafu { reason }.fail(),
+        None => Ok(()),
+    }
+}
+
+/// Why `value` does not read back as itself from the JSON bytes
+/// `serde_json` writes for it, or `Ok` when it does.
+///
+/// WHY the byte path, never `serde_json::Value`: storage writes and reads
+/// bytes, and a `Value` round trip differs from that for a `u128` or for
+/// borrowed data.
+fn json_round_trip<T: Serialize + DeserializeOwned + Eq>(value: &T) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| format!("cannot be written as a JSON value: {error}"))?;
+    let depth = json_depth(&bytes);
+    if depth > MAX_CONSUMER_JSON_DEPTH {
+        return Err(format!(
+            "nests {depth} levels deep in JSON; a consumer value may nest at most \
+             {MAX_CONSUMER_JSON_DEPTH}, because stored records wrap it further and serde_json \
+             refuses to read past 128 levels"
+        ));
+    }
+    // WHY `reported`: the value can be arbitrarily long, and a refusal must
+    // not be.
+    let json = identity::reported(&String::from_utf8_lossy(&bytes));
+    match serde_json::from_slice::<T>(&bytes) {
+        Ok(read) if read == *value => Ok(()),
+        Ok(_) => Err(format!(
+            "reads back from its JSON value {json} as a different value"
+        )),
+        Err(error) => Err(format!(
+            "cannot be read back from its JSON value {json}: {error}"
+        )),
+    }
+}
+
+/// The deepest JSON nesting a consumer value may have.
+///
+/// WHY: a stored record wraps a provenance or retention value a few levels
+/// deeper than the value itself (a version payload's member table, an
+/// operation record's change list, a destroyed head), and serde_json refuses
+/// to read input nested past 128 levels. A value that round-trips on its own
+/// could still publish a record that never decodes again. 64 leaves more
+/// than enough room for every stored wrapping, and far more nesting than a
+/// provenance or retention reference needs.
+const MAX_CONSUMER_JSON_DEPTH: usize = 64;
+
+/// The deepest nesting of arrays and objects in JSON text `bytes`.
+///
+/// INVARIANT: `bytes` is what `serde_json` just wrote, so it is valid JSON:
+/// brackets inside strings are skipped, and a backslash escapes exactly the
+/// next byte.
+fn json_depth(bytes: &[u8]) -> usize {
+    let (mut depth, mut deepest) = (0_usize, 0_usize);
+    let (mut in_string, mut escaped) = (false, false);
+    for &byte in bytes {
+        if in_string {
+            match (escaped, byte) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                (false, _) => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth = depth.saturating_add(1);
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// Step 4: every vector component is finite.
@@ -471,5 +604,26 @@ fn check_content(config: &IndexConfig, content: &MemberContent) -> Result<(), He
             actual: content.family(),
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_depth;
+
+    #[test]
+    fn json_depth_counts_arrays_and_objects_but_not_brackets_in_strings() {
+        let cases: [(&[u8], usize); 7] = [
+            (b"7", 0),
+            (br#""[[{""#, 0),
+            (b"[]", 1),
+            (br#"{"a":[1,{"b":[]}]}"#, 4),
+            (br#"["]]]",["\"[",[]]]"#, 3),
+            (br#"[["\\"],[]]"#, 2),
+            (br#"[{"k\"[":"v"}]"#, 2),
+        ];
+        for (json, depth) in cases {
+            assert_eq!(json_depth(json), depth, "{}", String::from_utf8_lossy(json));
+        }
     }
 }

@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "fjall-backed durable PersistenceBackend adapter for heurema indexes."
+description = "fjall-backed durable PersistenceBackend and LifecycleBackend adapter for heurema indexes."
 readme = "../../README.md"
 keywords = ["search", "persistence", "fjall"]
 categories = ["data-structures"]
@@ -27,6 +27,11 @@ fjall = { workspace = true }
 # per-crate dev-dependency instead of a workspace-level entry.
 [dev-dependencies]
 tempfile = "3"
+# WHY: tests/lifecycle_backend.rs (the LifecycleBackend contract) and
+# tests/lifecycle_conformance.rs (the IndexLifecycle driver over it) each run
+# every case against both adapters, the in-memory atmis and this durable one;
+# they live here because only this crate can also prove the reopen half.
+atmis = { workspace = true }
 
 [lints]
 workspace = true
@@ -40,4 +45,4 @@ workspace = true
 maturity = "alpha"
 since = "2026-08-15"
 phase = "02"
-phase-description = "PersistenceBackend adapter: fjall database with vector_indexes/fts_indexes keyspaces, each snapshot a versioned SnapshotEnvelope encoded with serde_json, PersistMode::SyncAll after every write"
+phase-description = "PersistenceBackend adapter: fjall database with vector_indexes/fts_indexes keyspaces, each snapshot a versioned SnapshotEnvelope encoded with serde_json, PersistMode::SyncAll after every write; LifecycleBackend adapter: five fixed lifecycle keyspaces, every write one SyncAll write batch under a backend-owned lock"

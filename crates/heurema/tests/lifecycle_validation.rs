@@ -16,7 +16,7 @@ use heurema::{
     MemberIdentity, OperationKey, OwnerNamespace, ProvenanceReference, RetentionReference,
     SnapshotFamily, TokenizerConfig, ValidatedOperation,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// test-local placeholder; heurēma defines no provenance shape
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -86,6 +86,84 @@ impl Serialize for WeightedProvenance {
 
 impl ProvenanceReference for WeightedProvenance {}
 
+/// test-local placeholder; heurēma defines no provenance shape. An identity
+/// written as an integer but read back only from a string: it survives a
+/// JSON object key, where serde_json writes the integer as its digits, and
+/// fails as a JSON value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct DigitsMember(u64);
+
+impl Serialize for DigitsMember {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DigitsMember {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let digits = String::deserialize(deserializer)?;
+        digits.parse().map(Self).map_err(serde::de::Error::custom)
+    }
+}
+
+impl MemberIdentity for DigitsMember {}
+
+/// test-local placeholder; heurēma defines no provenance shape.
+/// [`DigitsMember`]'s twin, written as a string, so it reads back both ways.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct TextMember(u64);
+
+impl Serialize for TextMember {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for TextMember {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let digits = String::deserialize(deserializer)?;
+        digits.parse().map(Self).map_err(serde::de::Error::custom)
+    }
+}
+
+impl MemberIdentity for TextMember {}
+
+/// test-local placeholder; heurēma defines no provenance shape. Empty tags
+/// are skipped when written, and with no serde default they cannot be read
+/// back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaggedProvenance {
+    source: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+}
+
+impl ProvenanceReference for TaggedProvenance {}
+
+/// test-local placeholder; heurēma defines no provenance shape. JSON writes
+/// `Some(None)` as `null`, which reads back as `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ReviewedProvenance {
+    #[expect(
+        clippy::option_option,
+        reason = "the nested option is the consumer shape serde_json cannot round-trip, which this placeholder exists to refuse"
+    )]
+    reviewed: Option<Option<u32>>,
+}
+
+impl ProvenanceReference for ReviewedProvenance {}
+
+/// test-local placeholder; heurēma defines no retention shape. The same
+/// shape as [`TaggedProvenance`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TaggedRetention {
+    source: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+}
+
+impl RetentionReference for TaggedRetention {}
+
 type Change = IndexChange<TestMember, PlaceholderProvenance, PlaceholderRetention>;
 type ChangeOf<M, P = PlaceholderProvenance> = IndexChange<M, P, PlaceholderRetention>;
 type Record = IndexRecord<PlaceholderRetention>;
@@ -111,6 +189,40 @@ fn check<M: MemberIdentity, P: ProvenanceReference>(
     change: ChangeOf<M, P>,
 ) -> Result<CheckedOperation<M, P, PlaceholderRetention>, HeuremaError> {
     CheckedOperation::check(operation(change)?)
+}
+
+/// [`check`] for an operation whose retention type is `R`.
+fn check_with<M: MemberIdentity, P: ProvenanceReference, R: RetentionReference>(
+    change: IndexChange<M, P, R>,
+) -> Result<CheckedOperation<M, P, R>, HeuremaError> {
+    CheckedOperation::check(LifecycleOperation::new(
+        index()?,
+        OperationKey::try_from("op-1")?,
+        change,
+    ))
+}
+
+fn tagged(
+    id: u64,
+    tags: &[&str],
+    content: MemberContent,
+) -> IndexMember<TestMember, TaggedProvenance> {
+    IndexMember::new(
+        TestMember(id),
+        TaggedProvenance {
+            source: 7,
+            tags: tags.iter().map(|&tag| tag.to_owned()).collect(),
+        },
+        content,
+    )
+}
+
+fn assert_unencodable(error: &HeuremaError, reason_starts: &str) {
+    let HeuremaError::UnencodableOperation { reason, .. } = error else {
+        panic!("unexpected {error:?}");
+    };
+    assert!(reason.starts_with(reason_starts), "{error}");
+    assert_eq!(error.category(), ErrorCategory::Refused, "{error}");
 }
 
 fn vector(id: u64, components: &[f32]) -> IndexMember<TestMember, PlaceholderProvenance> {
@@ -483,6 +595,120 @@ fn member_identity_that_does_not_survive_a_json_key_round_trip_is_refused()
 }
 
 #[test]
+fn member_identity_that_does_not_read_back_from_a_json_value_is_refused() -> Result<(), HeuremaError>
+{
+    let digits = |id| {
+        IndexMember::new(
+            DigitsMember(id),
+            PlaceholderProvenance(7),
+            MemberContent::Vector(vec![0.0, 1.0]),
+        )
+    };
+    let inserted = refused(check(ChangeOf::<DigitsMember>::Insert {
+        members: vec![digits(1)],
+    }));
+    let removed = refused(check(ChangeOf::<DigitsMember>::Remove {
+        members: vec![DigitsMember(1)],
+    }));
+    for error in [inserted, removed] {
+        let HeuremaError::InvalidIdentifier { kind, reason, .. } = &error else {
+            panic!("unexpected {error:?}");
+        };
+        assert_eq!(*kind, IdentifierKind::MemberIdentity, "{error}");
+        assert!(
+            reason.starts_with("cannot be read back from its JSON value"),
+            "{error}"
+        );
+    }
+
+    let text = |id| {
+        IndexMember::new(
+            TextMember(id),
+            PlaceholderProvenance(7),
+            MemberContent::Vector(vec![0.0, 1.0]),
+        )
+    };
+    check(ChangeOf::<TextMember>::Insert {
+        members: vec![text(1)],
+    })?;
+    check(ChangeOf::<TextMember>::Remove {
+        members: vec![TextMember(1)],
+    })?;
+    Ok(())
+}
+
+#[test]
+fn provenance_that_does_not_read_back_as_itself_is_refused() -> Result<(), HeuremaError> {
+    let point = || MemberContent::Vector(vec![0.0, 1.0]);
+    let empty_tags = [
+        check(ChangeOf::<TestMember, TaggedProvenance>::Insert {
+            members: vec![tagged(1, &[], point())],
+        }),
+        check(ChangeOf::<TestMember, TaggedProvenance>::Rebuild {
+            config: vector_config(2),
+            members: vec![tagged(1, &[], point())],
+        }),
+    ];
+    for result in empty_tags {
+        assert_unencodable(&refused(result), "provenance of member TestMember(1)");
+    }
+    // NOTE: with two refused provenances, the lower identity is reported in
+    // either listing order.
+    for members in [
+        vec![tagged(2, &[], point()), tagged(1, &[], point())],
+        vec![tagged(1, &[], point()), tagged(2, &[], point())],
+    ] {
+        assert_unencodable(
+            &refused(check(ChangeOf::<TestMember, TaggedProvenance>::Insert {
+                members,
+            })),
+            "provenance of member TestMember(1) ",
+        );
+    }
+    check(ChangeOf::<TestMember, TaggedProvenance>::Insert {
+        members: vec![tagged(1, &["a"], point())],
+    })?;
+    check(ChangeOf::<TestMember, TaggedProvenance>::Rebuild {
+        config: vector_config(2),
+        members: vec![tagged(1, &["a"], point())],
+    })?;
+
+    let reviewed = |reviewed| {
+        vec![IndexMember::new(
+            TestMember(1),
+            ReviewedProvenance { reviewed },
+            point(),
+        )]
+    };
+    assert_unencodable(
+        &refused(check(ChangeOf::<TestMember, ReviewedProvenance>::Insert {
+            members: reviewed(Some(None)),
+        })),
+        "provenance of member TestMember(1)",
+    );
+    for kept in [Some(Some(1)), None] {
+        check(ChangeOf::<TestMember, ReviewedProvenance>::Insert {
+            members: reviewed(kept),
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn retention_that_does_not_read_back_as_itself_is_refused() -> Result<(), HeuremaError> {
+    let destroy = |tags: Vec<String>| {
+        check_with(
+            IndexChange::<TestMember, PlaceholderProvenance, TaggedRetention>::Destroy {
+                retention: TaggedRetention { source: 9, tags },
+            },
+        )
+    };
+    assert_unencodable(&refused(destroy(Vec::new())), "retention ");
+    destroy(vec!["kept".to_owned()])?;
+    Ok(())
+}
+
+#[test]
 fn record_of_another_index_is_refused_before_the_permission_table() -> Result<(), HeuremaError> {
     let other = IndexIdentity::new(
         OwnerNamespace::try_from("example")?,
@@ -729,6 +955,19 @@ fn checks_run_in_the_documented_order() {
         matches!(error, HeuremaError::InvalidVector { .. }),
         "{error:?}"
     );
+
+    // Mixed families (step 7) before a provenance that does not read back
+    // (step 9).
+    let error = refused(check(ChangeOf::<TestMember, TaggedProvenance>::Insert {
+        members: vec![
+            tagged(1, &[], MemberContent::Vector(vec![0.0])),
+            tagged(2, &[], MemberContent::Document("text".to_owned())),
+        ],
+    }));
+    assert!(
+        matches!(error, HeuremaError::FamilyMismatch { .. }),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -816,6 +1055,12 @@ fn refusals_are_categorised_as_refused() -> Result<(), HeuremaError> {
                 MemberContent::Document("text".to_owned()),
             )],
         })),
+        refused(check(ChangeOf::<DigitsMember>::Remove {
+            members: vec![DigitsMember(1)],
+        })),
+        refused(check(ChangeOf::<TestMember, TaggedProvenance>::Insert {
+            members: vec![tagged(1, &[], MemberContent::Vector(vec![0.0]))],
+        })),
     ];
     for error in &refusals {
         assert_eq!(error.category(), ErrorCategory::Refused, "{error:?}");
@@ -830,5 +1075,63 @@ fn refusals_are_categorised_as_refused() -> Result<(), HeuremaError> {
         ErrorCategory::Unsupported,
         "{unsupported:?}"
     );
+    Ok(())
+}
+
+/// test-local placeholder; heurēma defines no provenance or retention
+/// shape. Serializes as JSON arrays nested as deep as it is built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Nested(Vec<Nested>);
+
+impl ProvenanceReference for Nested {}
+
+impl RetentionReference for Nested {}
+
+/// A value whose JSON nests exactly `depth` arrays deep (`depth >= 1`).
+fn nested(depth: usize) -> Nested {
+    (1..depth).fold(Nested(Vec::new()), |inner, _| Nested(vec![inner]))
+}
+
+fn nested_insert(depth: usize) -> IndexChange<TestMember, Nested, PlaceholderRetention> {
+    IndexChange::Insert {
+        members: vec![IndexMember::new(
+            TestMember(1),
+            nested(depth),
+            MemberContent::Vector(vec![0.0, 1.0]),
+        )],
+    }
+}
+
+fn nested_destroy(depth: usize) -> IndexChange<TestMember, PlaceholderProvenance, Nested> {
+    IndexChange::Destroy {
+        retention: nested(depth),
+    }
+}
+
+fn check_any<P: ProvenanceReference, R: RetentionReference>(
+    change: IndexChange<TestMember, P, R>,
+) -> Result<CheckedOperation<TestMember, P, R>, HeuremaError> {
+    CheckedOperation::check(LifecycleOperation::new(
+        index()?,
+        OperationKey::try_from("op-1")?,
+        change,
+    ))
+}
+
+#[test]
+fn consumer_values_nested_past_the_json_depth_limit_are_refused() -> Result<(), HeuremaError> {
+    check_any(nested_insert(64))?;
+    check_any(nested_destroy(64))?;
+
+    for error in [
+        refused(check_any(nested_insert(65))),
+        refused(check_any(nested_destroy(65))),
+    ] {
+        let HeuremaError::UnencodableOperation { reason, .. } = &error else {
+            panic!("unexpected {error:?}");
+        };
+        assert!(reason.contains("nests 65 levels deep"), "{error}");
+        assert_eq!(error.category(), ErrorCategory::Refused, "{error}");
+    }
     Ok(())
 }

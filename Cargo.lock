@@ -538,6 +538,7 @@ dependencies = [
 name = "thesauros"
 version = "0.2.0"
 dependencies = [
+ "atmis",
  "fjall",
  "heurema",
  "serde",

@@ -4,7 +4,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::SnapshotFamily;
-use crate::lifecycle::{IdentifierKind, IndexIdentity, IndexStateKind, LifecycleTransition};
+use crate::lifecycle::{
+    IdentifierKind, IndexIdentity, IndexStateKind, IndexVersion, LifecycleTransition,
+    OperationDigest, OperationKey,
+};
 
 /// WHY: Backend errors are type-erased only at the persistence boundary while
 /// SNAFU still receives a concrete source type for error-chain reporting.
@@ -110,11 +113,12 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
-    /// WHY: a snapshot whose format version this build does not read may be
-    /// valid for a newer build. It is its own variant, in the `Unsupported`
-    /// category, so a consumer never treats it as corrupt and overwrites it.
+    /// WHY: stored index data (a snapshot or a lifecycle record) whose format
+    /// version this build does not read may be valid for a newer build. It is
+    /// its own variant, in the `Unsupported` category, so a consumer never
+    /// treats it as corrupt and overwrites it.
     #[snafu(display(
-        "index snapshot format version {found} is not supported; this build reads version {supported}"
+        "stored index data format version {found} is not supported; this build reads version {supported}"
     ))]
     UnsupportedSnapshotVersion {
         /// Format version the stored bytes declare.
@@ -127,10 +131,12 @@ pub enum HeuremaError {
     },
 
     /// WHY: stored bytes that cannot be decoded, or that decode into a state
-    /// violating an engine invariant, are corrupt rather than a backend I/O
-    /// failure; a consumer must rebuild them, and retrying the read cannot
-    /// help.
-    #[snafu(display("corrupt index snapshot: {source}"))]
+    /// violating an engine invariant or contradicting the key they were
+    /// stored under, are corrupt rather than a backend I/O failure, and
+    /// retrying the read cannot help. A snapshot is saved again from a
+    /// rebuilt index; a lifecycle record has no repair path (see
+    /// [`ErrorCategory::Corrupt`]).
+    #[snafu(display("corrupt stored index data: {source}"))]
     CorruptSnapshot {
         /// Decoder error describing why the bytes were refused.
         source: PersistenceSource,
@@ -274,10 +280,13 @@ pub enum HeuremaError {
     },
 
     /// WHY: an operation's digest is computed over a canonical encoding that
-    /// admits no floating-point numbers and only string or integer map keys.
-    /// A consumer member identity, provenance, or retention value outside
-    /// that grammar is the caller's input to fix, not a storage failure.
-    #[snafu(display("operation has no canonical encoding: {reason}"))]
+    /// admits no floating-point numbers and only string or integer map keys,
+    /// and every consumer value the lifecycle stores must read back from its
+    /// `serde_json` encoding as the value written. A consumer provenance or
+    /// retention value outside that grammar, or one `serde_json` writes but
+    /// cannot read back as itself, is the caller's input to fix, not a
+    /// storage failure.
+    #[snafu(display("operation cannot be encoded: {reason}"))]
     UnencodableOperation {
         /// Why the encoder refused the operation.
         reason: String,
@@ -285,6 +294,196 @@ pub enum HeuremaError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
+
+    // NOTE: lifecycle storage refusals, raised by a `LifecycleBackend` write,
+    // by the replay check that reads the operation records it keeps, or (for
+    // `WriterHeld`) by the backend's shared `WriterLock`.
+    /// WHY: a version staged but never published is the only record of an
+    /// interrupted operation. Staging over it would destroy that record, and
+    /// destroying the index beside it would leave a marker no head can
+    /// explain, so every later stage or destroy of the index is refused
+    /// until recovery moves the staged state to quarantine. Every lifecycle
+    /// over a backend holds its writer
+    /// ([`LifecycleBackend::writer`](crate::LifecycleBackend::writer)) from
+    /// its head read through its publish, so among writers that hold it for
+    /// their whole operation a marker met here belongs to no running
+    /// operation. A writer that bypasses the writer, or holds it only around
+    /// each backend call, can meet or cause another writer's live stage
+    /// here, and is still refused with this variant.
+    #[snafu(display(
+        "index {index} holds interrupted staged state for version {version}; nothing was written"
+    ))]
+    StagedStateExists {
+        /// The index holding the staged state.
+        index: IndexIdentity,
+        /// The staged version found.
+        version: IndexVersion,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: a lifecycle write is computed from the head it read. If another
+    /// writer moved the head in between, applying the write would build on a
+    /// state that is no longer current, so the backend compares the head
+    /// under its own lock and refuses instead.
+    #[snafu(display("index {index} changed since its head was read; nothing was written"))]
+    HeadChanged {
+        /// The index whose head changed.
+        index: IndexIdentity,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: an operation key names one operation forever. The same key with
+    /// a different digest is a different operation reusing the key; applying
+    /// it would make the key's recorded outcome describe content it never
+    /// saw, so it is refused and both digests are reported. The detail is
+    /// boxed to keep `HeuremaError` within clippy's `result_large_err` bound.
+    #[snafu(display(
+        "operation key {} on index {} is recorded with digest {}, not the requested {}",
+        conflict.key(),
+        conflict.index(),
+        conflict.recorded(),
+        conflict.requested()
+    ))]
+    OperationConflict {
+        /// The index, key, and both digests.
+        conflict: Box<OperationConflictDetail>,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: publish and quarantine act on one exact staged state, named by
+    /// its marker bytes. If the marker is gone, holds other bytes, or lost
+    /// its payload, another writer published, quarantined, or restaged that
+    /// version, and acting anyway would publish or move state this caller
+    /// never staged.
+    #[snafu(display(
+        "index {index} holds no staged state for version {version} matching this write; nothing was written"
+    ))]
+    StagedStateMissing {
+        /// The index the write named.
+        index: IndexIdentity,
+        /// The staged version the write named.
+        version: IndexVersion,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: an operation record is the audit entry of a published operation
+    /// and is never overwritten. A second publish under a recorded key means
+    /// the caller missed that record; it must read the record back and
+    /// replay or refuse, never write over it.
+    #[snafu(display("index {index} already records operation {key}; nothing was written"))]
+    OperationRecorded {
+        /// The index the write named.
+        index: IndexIdentity,
+        /// The operation key already recorded.
+        key: OperationKey,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: every lifecycle over one backend shares the backend's writer. A
+    /// thread asking for it again while it holds it would wait for itself
+    /// forever, so the request is refused instead. Dropping what holds it (a
+    /// [`WriterGuard`](crate::WriterGuard) from
+    /// [`WriterLock::acquire`](crate::WriterLock::acquire), or a
+    /// [`Prepared`](crate::Prepared) or [`Staged`](crate::Staged)
+    /// operation, which publishing consumes) releases the writer.
+    #[snafu(display(
+        "this thread already holds the backend's lifecycle writer (a WriterGuard, or a Prepared or Staged operation, not yet dropped); nothing was written"
+    ))]
+    WriterHeld {
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    /// WHY: stage never overwrites a stored payload. A lifecycle stages the
+    /// version after the head it compare-and-sets, so a payload already
+    /// under that version with no marker is published by no head and staged
+    /// by no marker. The stored state contradicts itself, and recovery
+    /// (which moves only marked state) cannot clear it, so the category is
+    /// Corrupt. The backend never decodes a head, so it cannot tell that
+    /// payload from a published one: a direct backend caller that stages a
+    /// version number already published gets this variant too, category
+    /// Corrupt included, over an intact store. That caller reads the head
+    /// again and stages the version after the one it names.
+    #[snafu(display(
+        "index {index} already stores a payload for version {version} that no staging marker names; nothing was written"
+    ))]
+    VersionStored {
+        /// The index the write named.
+        index: IndexIdentity,
+        /// The version whose payload is already stored.
+        version: IndexVersion,
+        /// Error creation location.
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+}
+
+/// The index, key, and digests of an [`HeuremaError::OperationConflict`].
+///
+/// WHY: the conflict carries two identifiers and two digests, which would
+/// push `HeuremaError` past clippy's 128-byte `result_large_err` threshold;
+/// the variant boxes this detail instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OperationConflictDetail {
+    index: IndexIdentity,
+    key: OperationKey,
+    recorded: OperationDigest,
+    requested: OperationDigest,
+}
+
+impl OperationConflictDetail {
+    /// WHY: every part is an already validated identifier, so pairing them
+    /// cannot fail.
+    #[must_use]
+    pub const fn new(
+        index: IndexIdentity,
+        key: OperationKey,
+        recorded: OperationDigest,
+        requested: OperationDigest,
+    ) -> Self {
+        Self {
+            index,
+            key,
+            recorded,
+            requested,
+        }
+    }
+
+    /// The index the key belongs to.
+    #[must_use]
+    pub const fn index(&self) -> &IndexIdentity {
+        &self.index
+    }
+
+    /// The operation key both operations use.
+    #[must_use]
+    pub const fn key(&self) -> &OperationKey {
+        &self.key
+    }
+
+    /// The digest recorded when the key's operation was published.
+    #[must_use]
+    pub const fn recorded(&self) -> &OperationDigest {
+        &self.recorded
+    }
+
+    /// The digest of the operation that reused the key.
+    #[must_use]
+    pub const fn requested(&self) -> &OperationDigest {
+        &self.requested
+    }
 }
 
 /// The class of failure a [`HeuremaError`] belongs to.
@@ -308,13 +507,35 @@ pub enum ErrorCategory {
     /// in this category may be valid for a newer build: do not overwrite them.
     Unsupported,
     /// Stored bytes are present but cannot be decoded, violate an engine
-    /// invariant, or belong to another index family. Retrying the read cannot
-    /// succeed; the stored state needs a rebuild.
+    /// invariant, or belong to another index family, or stored lifecycle
+    /// state contradicts itself. Retrying the read cannot succeed. A
+    /// snapshot is saved again from a rebuilt index; a lifecycle record
+    /// (head, payload, or operation record) has no repair path. Recovery,
+    /// which a later Phase 02 change adds, moves only staged state to
+    /// quarantine and refuses an unreadable head. One exception:
+    /// [`HeuremaError::VersionStored`] also reaches a direct
+    /// [`LifecycleBackend`](crate::LifecycleBackend) caller that stages a
+    /// version already published, whose store is intact (see that variant).
     Corrupt,
     /// The persistence backend failed to encode, write, or read bytes; the
     /// error's source chain carries the backend's cause. Whether a retry can
     /// succeed depends on that cause.
     Storage,
+    /// The write collides with state another writer recorded: the head
+    /// moved after it was read, the staged state it names changed, or its
+    /// operation key is already recorded. Nothing was written. Reading the
+    /// state again decides what follows: a replay, a fresh attempt, or a
+    /// refusal.
+    Conflict,
+    /// The index holds interrupted staged state from an operation that never
+    /// published. Staging and destroying that index are refused until
+    /// recovery moves the state to quarantine; other indexes are unaffected.
+    /// For writers that hold the backend's writer from their head read
+    /// through their publish (every [`IndexLifecycle`](crate::IndexLifecycle)
+    /// does), this never names a stage another operation is still running.
+    /// A live stage of a writer that bypasses the writer, or holds it only
+    /// around each backend call, is reported here too.
+    RecoveryRequired,
 }
 
 impl HeuremaError {
@@ -336,18 +557,28 @@ impl HeuremaError {
             | Self::EmptyBatch { .. }
             | Self::TransitionNotPermitted { .. }
             | Self::RecordMismatch { .. }
-            | Self::UnencodableOperation { .. } => ErrorCategory::Refused,
+            | Self::UnencodableOperation { .. }
+            | Self::WriterHeld { .. } => ErrorCategory::Refused,
             Self::IndexNotFound { .. } => ErrorCategory::NotFound,
             Self::NotYetImplemented { .. } | Self::UnsupportedSnapshotVersion { .. } => {
                 ErrorCategory::Unsupported
             }
-            Self::SnapshotFormat { .. } | Self::CorruptSnapshot { .. } => ErrorCategory::Corrupt,
+            Self::SnapshotFormat { .. }
+            | Self::CorruptSnapshot { .. }
+            | Self::VersionStored { .. } => ErrorCategory::Corrupt,
             Self::Persistence { .. } => ErrorCategory::Storage,
+            // NOTE: lifecycle storage refusals.
+            Self::HeadChanged { .. }
+            | Self::OperationConflict { .. }
+            | Self::StagedStateMissing { .. }
+            | Self::OperationRecorded { .. } => ErrorCategory::Conflict,
+            Self::StagedStateExists { .. } => ErrorCategory::RecoveryRequired,
         }
     }
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests need concise identifier fixtures")]
 mod tests {
     use std::collections::BTreeSet;
 
@@ -411,6 +642,36 @@ mod tests {
             }
             .build(),
             UnencodableOperationSnafu { reason: "f64" }.build(),
+            // NOTE: lifecycle storage refusals.
+            StagedStateExistsSnafu {
+                index: sample_index(),
+                version: IndexVersion::FIRST,
+            }
+            .build(),
+            HeadChangedSnafu {
+                index: sample_index(),
+            }
+            .build(),
+            OperationConflictSnafu {
+                conflict: Box::new(sample_conflict()),
+            }
+            .build(),
+            StagedStateMissingSnafu {
+                index: sample_index(),
+                version: IndexVersion::FIRST,
+            }
+            .build(),
+            OperationRecordedSnafu {
+                index: sample_index(),
+                key: sample_key(),
+            }
+            .build(),
+            WriterHeldSnafu.build(),
+            VersionStoredSnafu {
+                index: sample_index(),
+                version: IndexVersion::FIRST,
+            }
+            .build(),
         ]
     }
 
@@ -432,6 +693,19 @@ mod tests {
             panic!("sample identifiers are grammar-conformant");
         };
         IndexIdentity::new(namespace, name)
+    }
+
+    fn sample_key() -> OperationKey {
+        OperationKey::try_from("op-1").expect("key")
+    }
+
+    fn sample_conflict() -> OperationConflictDetail {
+        OperationConflictDetail::new(
+            sample_index(),
+            sample_key(),
+            OperationDigest::try_from("0a".repeat(32)).expect("recorded digest"),
+            OperationDigest::try_from("0b".repeat(32)).expect("requested digest"),
+        )
     }
 
     /// The expected category of each variant, one arm per variant and no
@@ -468,6 +742,22 @@ mod tests {
             HeuremaError::UnencodableOperation { .. } => {
                 ("UnencodableOperation", ErrorCategory::Refused)
             }
+            // NOTE: lifecycle storage refusals.
+            HeuremaError::StagedStateExists { .. } => {
+                ("StagedStateExists", ErrorCategory::RecoveryRequired)
+            }
+            HeuremaError::HeadChanged { .. } => ("HeadChanged", ErrorCategory::Conflict),
+            HeuremaError::OperationConflict { .. } => {
+                ("OperationConflict", ErrorCategory::Conflict)
+            }
+            HeuremaError::StagedStateMissing { .. } => {
+                ("StagedStateMissing", ErrorCategory::Conflict)
+            }
+            HeuremaError::OperationRecorded { .. } => {
+                ("OperationRecorded", ErrorCategory::Conflict)
+            }
+            HeuremaError::WriterHeld { .. } => ("WriterHeld", ErrorCategory::Refused),
+            HeuremaError::VersionStored { .. } => ("VersionStored", ErrorCategory::Corrupt),
         }
     }
 
@@ -501,9 +791,71 @@ mod tests {
                 "TransitionNotPermitted",
                 "UnencodableOperation",
                 "UnsupportedSnapshotVersion",
+                // NOTE: lifecycle storage refusals.
+                "StagedStateExists",
+                "HeadChanged",
+                "OperationConflict",
+                "StagedStateMissing",
+                "OperationRecorded",
+                "WriterHeld",
+                "VersionStored",
             ]),
             "every variant is sampled"
         );
+    }
+
+    #[test]
+    fn error_displays_carry_no_em_dash() {
+        for error in every_variant() {
+            let message = error.to_string();
+            assert!(!message.contains('\u{2014}'), "{message}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_refusals_name_the_index_and_what_was_found() {
+        let staged = StagedStateExistsSnafu {
+            index: sample_index(),
+            version: IndexVersion::FIRST,
+        }
+        .build();
+        assert_eq!(
+            staged.to_string(),
+            "index example/notes holds interrupted staged state for version 1; nothing was written"
+        );
+
+        let held = WriterHeldSnafu.build();
+        assert_eq!(
+            held.to_string(),
+            "this thread already holds the backend's lifecycle writer (a WriterGuard, or a \
+             Prepared or Staged operation, not yet dropped); nothing was written"
+        );
+
+        let stored = VersionStoredSnafu {
+            index: sample_index(),
+            version: IndexVersion::FIRST,
+        }
+        .build();
+        assert_eq!(
+            stored.to_string(),
+            "index example/notes already stores a payload for version 1 that no staging marker \
+             names; nothing was written"
+        );
+
+        let conflict = OperationConflictSnafu {
+            conflict: Box::new(sample_conflict()),
+        }
+        .build();
+        let message = conflict.to_string();
+        assert!(message.contains("op-1"), "{message}");
+        assert!(message.contains("example/notes"), "{message}");
+        assert!(message.contains(&"0a".repeat(32)), "{message}");
+        assert!(message.contains(&"0b".repeat(32)), "{message}");
+
+        let detail = sample_conflict();
+        assert_eq!(detail.index(), &sample_index());
+        assert_eq!(detail.key(), &sample_key());
+        assert_ne!(detail.recorded(), detail.requested());
     }
 
     #[test]
@@ -582,7 +934,7 @@ mod tests {
                     reason: "a map key encodes as a sequence",
                 }
                 .build(),
-                "operation has no canonical encoding: a map key encodes as a sequence",
+                "operation cannot be encoded: a map key encodes as a sequence",
             ),
         ];
         for (error, expected) in cases {

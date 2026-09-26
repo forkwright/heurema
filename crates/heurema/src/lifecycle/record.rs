@@ -74,8 +74,9 @@ impl<R> IndexState<R> {
 /// state) is therefore this head together with the payload of the version it
 /// names. For a destroyed index, whose version payloads are removed under a
 /// retention reference, the last member identities and provenance are kept in
-/// the destroy operation's record instead. The payload and operation-record
-/// types land with durable staging; this crate stores none of them yet.
+/// the destroy operation's record instead.
+/// [`IndexLifecycle::index`](crate::IndexLifecycle::index) reads the head and
+/// then that payload, as a [`PublishedIndex`](crate::PublishedIndex).
 ///
 /// WHY: members and their provenance belong to a version, not to the index.
 /// A published version never changes, so its member table is fixed with it,

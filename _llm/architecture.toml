@@ -9,7 +9,7 @@ source_docs = [
 ]
 
 [architecture]
-summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. The workspace holds the traits-and-engines crate (heurema: HNSW, BM25, RRF, snapshot envelope) and its PersistenceBackend adapter siblings (atmis, thesauros)."
+summary = "Shared HNSW vector, BM25 full-text, persistence, and reciprocal-rank-fusion search primitives for the forkwright fleet. The workspace holds the traits-and-engines crate (heurema: HNSW, BM25, RRF, snapshot envelope, and the durable index lifecycle) and its PersistenceBackend and LifecycleBackend adapter siblings (atmis, thesauros)."
 layers = [
   "public-api",
   "errors",
@@ -20,22 +20,23 @@ layers = [
   "rank-fusion",
   "lifecycle-vocabulary",
   "lifecycle-validation",
+  "lifecycle-driver",
 ]
 
 [[architecture.crates]]
 name = "heurema"
 path = "crates/heurema"
-role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary and pre-publish validation (lifecycle module: identities, operations, transitions, index record, CheckedOperation / ValidatedOperation, the canonical OperationDigest; pure functions, no storage yet), and the workspace error chain with its ErrorCategory classification."
+role = "Public traits (VectorIndex, FtsIndex, PersistenceBackend), the in-memory HNSW graph (HnswIndex) and Simple-pipeline BM25 engine (Bm25Index), reciprocal-rank fusion, the versioned per-index snapshot envelope (SnapshotEnvelope, SnapshotFamily, decode_snapshot_payload), the Phase 02 durable-lifecycle vocabulary and pre-publish validation (lifecycle module: identities, operations, transitions, index record, CheckedOperation / ValidatedOperation, the canonical OperationDigest; pure functions), its storage contract (LifecycleBackend, storage_key), and its driver (IndexLifecycle: stage and atomic publish over private serde_json record encodings, PublishedIndex reads), and the workspace error chain with its ErrorCategory classification."
 
 [[architecture.crates]]
 name = "atmis"
 path = "crates/atmis"
-role = "In-memory PersistenceBackend adapter: HashMap<String, Vec<u8>> snapshots behind an RwLock, each a versioned SnapshotEnvelope encoded with serde_json. No disk I/O; the default backend for tests."
+role = "In-memory PersistenceBackend and LifecycleBackend adapter: HashMap<String, Vec<u8>> snapshots behind an RwLock, each a versioned SnapshotEnvelope encoded with serde_json, and five lifecycle maps behind one Mutex so every lifecycle write is one guarded mutation (a poisoned lock is refused, never recovered). No disk I/O; the default backend for tests."
 
 [[architecture.crates]]
 name = "thesauros"
 path = "crates/thesauros"
-role = "Durable PersistenceBackend adapter: a fjall database with separate vector_indexes/fts_indexes keyspaces, each snapshot a versioned SnapshotEnvelope encoded with serde_json, fsyncing (PersistMode::SyncAll) after every write."
+role = "Durable PersistenceBackend and LifecycleBackend adapter: a fjall database with separate vector_indexes/fts_indexes keyspaces, each snapshot a versioned SnapshotEnvelope encoded with serde_json, fsyncing (PersistMode::SyncAll) after every write; five fixed lifecycle keyspaces, every lifecycle write one SyncAll write batch committed under a backend-owned lock, reads through an fjall snapshot."
 
 [[interfaces]]
 crate = "heurema"
@@ -107,7 +108,19 @@ purpose = "Type-erased adapter for backend-specific persistence errors, kept wal
 crate = "heurema"
 kind = "type"
 name = "ErrorCategory"
-purpose = "Class of a HeuremaError (Refused, NotFound, Unsupported, Corrupt, Storage), returned by HeuremaError::category() through an exhaustive match so a consumer can decide retry, report, or repair without matching variants."
+purpose = "Class of a HeuremaError (Refused, NotFound, Unsupported, Corrupt, Storage, Conflict, RecoveryRequired), returned by HeuremaError::category() through an exhaustive match so a consumer can decide retry, report, or repair without matching variants."
+
+[[interfaces]]
+crate = "heurema"
+kind = "trait"
+name = "LifecycleBackend"
+purpose = "Object-safe storage contract of the durable lifecycle, beside the unchanged PersistenceBackend (which has no delete, exists, batch, or compare-and-set and is not dyn-compatible). writer() returns the one WriterLock every lifecycle over the backend shares. Adapters store opaque heurema-encoded bytes under the storage_key grammar and own no encoding or rule. stage, publish, destroy, and quarantine are each atomic and durable before Ok; each compares the head (or staged marker) it expects under a backend-owned lock, never overwrites a payload or operation record, and refuses while the index holds staged state; stage also refuses a payload already under its version (VersionStored) and a recorded operation key. thesauros refuses a value over u32::MAX bytes before writing, and its stage also refuses a head or operation record its publish could not store (StageWrite carries their sizes), so a size refusal never leaves orphan staged state. read_* and list_* serve the driver and recovery. Implemented by AtmisBackend and ThesaurosBackend, and forwarded, writer included, through &B, Box<B>, and Arc<B>."
+
+[[interfaces]]
+crate = "heurema"
+kind = "module"
+name = "storage_key"
+purpose = "The one key grammar both lifecycle adapters use: namespace/name heads, namespace/name/{version:020} payloads and staging markers, namespace/name/key operation records, and {sequence:020}/namespace/name/{version:020}/marker|payload quarantine entries, with parsers that report a malformed stored key as CorruptSnapshot. Each kind lives in its own map, because a digits-only operation key spells a version key."
 
 [[interfaces]]
 crate = "heurema"
@@ -167,7 +180,7 @@ purpose = "Marker trait a consumer implements on its own provenance newtype; nev
 crate = "heurema"
 kind = "type"
 name = "CheckedOperation"
-purpose = "A LifecycleOperation that passed every stateless check, in a documented order (empty batch, duplicate member, member identity shape, non-finite vector, configuration validity through the engines' own checks, Rebuild member family and dimension, mixed-family Insert, canonical encodability), plus its OperationIdentity. check() is a pure function; permit(current record) applies the permission table and the checks against the current configuration and yields a ValidatedOperation."
+purpose = "A LifecycleOperation that passed every stateless check, in a documented order (empty batch, duplicate member, member identity shape and its JSON key and value read-back, non-finite vector, configuration validity through the engines' own checks, Rebuild member family and dimension, mixed-family Insert, canonical encodability, then a JSON read-back of every stored provenance, in identity order, and of a Destroy's retention, refused as UnencodableOperation), plus its OperationIdentity. check() is a pure function; permit(current record) applies the permission table and the checks against the current configuration and yields a ValidatedOperation."
 
 [[interfaces]]
 crate = "heurema"
@@ -180,3 +193,33 @@ crate = "heurema"
 kind = "type"
 name = "OperationDigest"
 purpose = "SHA-256 over the domain prefix heurema.lifecycle.operation.v1 and the operation's canonical encoding, written by a private serde serializer with a fixed byte grammar documented on the type: sorted map entries, string or integer keys only, floats refused in consumer types, vector components as f32 bit patterns, members sorted by identity, the key not hashed."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "IndexLifecycle"
+purpose = "The lifecycle driver over any LifecycleBackend. apply(operation) runs, in order: CheckedOperation::check (no backend call), the backend's shared WriterLock (WriterHeld if this thread already holds it; another thread waits), head read, replay lookup by (index, key) (same digest returns the recorded PublishReceipt with replayed set and writes nothing; another digest is OperationConflict), the active payload cross-checked against the head (CorruptSnapshot when missing or of another configuration), permit, the staged-state check (any staging marker refuses every mutation of the index with StagedStateExists, Create and Destroy included), an in-memory build of the successor version (members in ascending identity order; Rebuild from an empty engine), stage (payload plus marker, head compare-and-set, carrying the sizes of the head and operation record publish writes), and publish (one atomic write of head, operation record, and marker removal; Destroy writes its destroyed head and removes every payload instead). prepare / Prepared::stage / Staged::publish expose the steps. record() reads the head; index() reads the head then only the payload it names, so a staged version is never readable. open() does not recover yet: orphan staged state blocks its index until a later Phase 02 change adds recovery."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "WriterLock"
+purpose = "The lifecycle writer every lifecycle over one backend shares, returned by LifecycleBackend::writer. acquire() waits while another thread holds it and refuses a thread that already holds it with WriterHeld; the !Send WriterGuard releases it on drop, unwinding included. Guards no data; not FIFO; a leaked guard keeps it held."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "PublishedIndex"
+purpose = "One published version read whole: version, config, member table (MemberEntry per member: provenance, introducing version, superseded version), and query_vector / query_text returning IndexHit values that carry identity, score, provenance, and version. FamilyMismatch when the query's family differs from the index's."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "PublishReceipt"
+purpose = "Outcome of a published or replayed operation: index, OperationIdentity, transition, the resulting IndexState (on a replay, the state recorded at first publish), and whether it was a replay."
+
+[[interfaces]]
+crate = "heurema"
+kind = "type"
+name = "MemberChange"
+purpose = "Audit linkage of one member in an operation record (Inserted, Replaced, Removed, AbsentOnRemove, Dropped, Retired), carrying the displaced MemberEntry whole. Stored in every operation record now; the read API arrives in a later Phase 02 change without a format change."

@@ -1,7 +1,12 @@
 //! Persistence backend contract for Heurēma indexes.
 
-use serde::de::{DeserializeOwned, IgnoredAny};
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::fmt;
+use std::marker::PhantomData;
+
+use serde::de::{self, DeserializeOwned, IgnoredAny, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::{SnapshotFormatSnafu, UnsupportedSnapshotVersionSnafu};
 use crate::{FtsIndex, HeuremaError, PersistenceSource, VectorIndex};
@@ -115,6 +120,89 @@ where
     serde_json::from_slice::<SnapshotEnvelope<T>>(bytes)
         .map_err(decode_error)?
         .into_payload(expected)
+}
+
+/// Decodes a map from stored bytes, refusing a key it names twice.
+///
+/// WHY: serde's `BTreeMap` visitor keeps the last value of a repeated key,
+/// so stored bytes that name one key twice would decode, silently, as
+/// whichever value came last, and an engine would serve it. Every map
+/// heurēma decodes from stored bytes refuses the repeat instead: the HNSW
+/// node map, the BM25 document, posting, and term-count maps (all shared by
+/// snapshots and lifecycle version payloads), and a version payload's
+/// member table. This also refuses distinct encoded keys that read back as
+/// one key. A set (an HNSW neighbour or backbone list) is not a map: a
+/// repeated element carries no second value to choose between.
+pub(crate) fn unique_map<'de, D, K, V>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    K: Ord + Deserialize<'de>,
+    V: Deserialize<'de>,
+{
+    deserializer.deserialize_map(UniqueKeys::new("a map naming each key once", |_| {
+        "a stored map names one key twice".to_owned()
+    }))
+}
+
+/// A map decoded through [`unique_map`], for a map that is another map's
+/// value.
+pub(crate) struct UniqueMap<K, V>(pub(crate) BTreeMap<K, V>);
+
+impl<'de, K, V> Deserialize<'de> for UniqueMap<K, V>
+where
+    K: Ord + Deserialize<'de>,
+    V: Deserialize<'de>,
+{
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        unique_map(deserializer).map(Self)
+    }
+}
+
+/// The map visitor of [`unique_map`]: it refuses a repeated key with the
+/// message `repeated` gives for that key.
+pub(crate) struct UniqueKeys<K, V> {
+    expecting: &'static str,
+    repeated: fn(&K) -> String,
+    entries: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V> UniqueKeys<K, V> {
+    /// A visitor that expects `expecting` and refuses a repeated key with
+    /// `repeated(key)`.
+    pub(crate) const fn new(expecting: &'static str, repeated: fn(&K) -> String) -> Self {
+        Self {
+            expecting,
+            repeated,
+            entries: PhantomData,
+        }
+    }
+}
+
+impl<'de, K, V> Visitor<'de> for UniqueKeys<K, V>
+where
+    K: Ord + Deserialize<'de>,
+    V: Deserialize<'de>,
+{
+    type Value = BTreeMap<K, V>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.expecting)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut entries = BTreeMap::new();
+        while let Some((key, value)) = map.next_entry::<K, V>()? {
+            match entries.entry(key) {
+                Entry::Vacant(slot) => {
+                    slot.insert(value);
+                }
+                Entry::Occupied(slot) => {
+                    return Err(de::Error::custom((self.repeated)(slot.key())));
+                }
+            }
+        }
+        Ok(entries)
+    }
 }
 
 /// WHY: Persistence remains outside HNSW and BM25 algorithms so consumers can

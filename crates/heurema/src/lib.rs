@@ -23,8 +23,9 @@ pub mod fts;
 /// proof instead of per-consumer graph implementations.
 pub mod hnsw;
 /// WHY: The durable retrieval lifecycle's contract (index identity, operation
-/// identity, transitions, records) must be readable from types before any
-/// durable write depends on it, and consumers bind that one vocabulary.
+/// identity, transitions, records, and the storage those records live in)
+/// must be readable from types before any durable write depends on it, and
+/// consumers and adapters bind that one vocabulary.
 pub mod lifecycle;
 /// WHY: Persistence stays pluggable so query engines can choose in-memory,
 /// fjall-backed, or engine-owned storage without changing index APIs.
@@ -32,7 +33,7 @@ pub mod persistence;
 /// WHY: Hybrid search consumers need rank fusion without depending on krites.
 pub mod rrf;
 
-pub use error::{ErrorCategory, HeuremaError, PersistenceSource};
+pub use error::{ErrorCategory, HeuremaError, OperationConflictDetail, PersistenceSource};
 pub use fts::{Bm25Index, FtsConfig, FtsIndex, TokenizerConfig};
 pub use hnsw::{HnswConfig, HnswIndex, VectorDistance, VectorIndex};
 pub use lifecycle::{
@@ -40,6 +41,14 @@ pub use lifecycle::{
     IndexName, IndexRecord, IndexState, IndexStateKind, IndexVersion, LifecycleOperation,
     LifecycleTransition, MemberContent, MemberIdentity, OperationDigest, OperationIdentity,
     OperationKey, OwnerNamespace, ProvenanceReference, RetentionReference, ValidatedOperation,
+};
+pub use lifecycle::{
+    DestroyWrite, LIFECYCLE_FORMAT_VERSION, LifecycleBackend, PublishWrite, QuarantineWrite,
+    QuarantinedEntry, StageWrite, StagedEntry, WriterGuard, WriterLock,
+};
+pub use lifecycle::{
+    IndexHit, IndexLifecycle, MemberChange, MemberEntry, Preparation, Prepared, PublishReceipt,
+    PublishedIndex, Staged,
 };
 pub use persistence::{
     PersistenceBackend, SNAPSHOT_FORMAT_VERSION, SnapshotEnvelope, SnapshotFamily,
