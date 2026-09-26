@@ -64,9 +64,11 @@ use crate::{HeuremaError, OperationConflictDetail};
 ///     at which the operation becomes visible.
 ///
 /// Steps 1 to 8 write nothing; a refusal at any of them leaves storage as it
-/// was. Steps 9 and 10 compare-and-set the head read in step 3. Only a
-/// writer that bypasses the backend's writer (or damage) can make them
-/// refuse; they then refuse with [`HeuremaError::HeadChanged`],
+/// was. Steps 9 and 10 compare-and-set the head read in step 3. Apart from
+/// a backend's size refusal at step 9 ([`HeuremaError::Persistence`],
+/// nothing written), only a writer that bypasses the backend's writer (or
+/// damage) can make them refuse; they then refuse with
+/// [`HeuremaError::HeadChanged`],
 /// [`HeuremaError::StagedStateExists`], [`HeuremaError::VersionStored`],
 /// [`HeuremaError::StagedStateMissing`], or
 /// [`HeuremaError::OperationRecorded`], and the refused write writes
@@ -559,7 +561,7 @@ impl<B: LifecycleBackend, M, P, R> Staged<'_, B, M, P, R> {
     /// [`HeuremaError::HeadChanged`], [`HeuremaError::StagedStateMissing`],
     /// [`HeuremaError::StagedStateExists`], or
     /// [`HeuremaError::OperationRecorded`] come only from a writer that
-    /// bypasses the backend's writer. The publish write itself wrote
+    /// bypasses the backend's writer, or from damage. The publish write itself wrote
     /// nothing, but the version staged at step 9 stays as orphan staged
     /// state, exactly as if the [`Staged`] had been dropped; a Destroy
     /// staged nothing.

@@ -57,8 +57,10 @@ pub trait MemberIdentity: Ord + Hash + Clone + fmt::Debug + Serialize + Deserial
 /// `Option<Option<T>>` loses `Some(None)`. Validation refuses a value that
 /// does not read back with
 /// [`HeuremaError::UnencodableOperation`](crate::HeuremaError::UnencodableOperation).
-/// A stored record nests the value a few levels deep, so its own nesting
-/// must stay well under serde_json's recursion limit of 128.
+/// A stored record nests the value a few levels deeper, and serde_json
+/// reads at most 128 levels, so the value's own JSON may nest at most 64
+/// levels deep; validation refuses a deeper one with
+/// [`HeuremaError::UnencodableOperation`](crate::HeuremaError::UnencodableOperation).
 ///
 /// WHY not blanket-implemented: provenance is required on every member, and
 /// a blanket impl would let `()` or a bare `String` satisfy that requirement
@@ -74,8 +76,9 @@ pub trait ProvenanceReference: Clone + Eq + fmt::Debug + Serialize + Deserialize
 /// record, and never interprets it.
 ///
 /// Contract: as for [`ProvenanceReference`], equal values must serialize
-/// identically, since the Destroy operation's digest hashes this value, and
-/// a value must read back as itself from its JSON encoding.
+/// identically, since the Destroy operation's digest hashes this value, a
+/// value must read back as itself from its JSON encoding, and its JSON may
+/// nest at most 64 levels deep.
 ///
 /// WHY not blanket-implemented: physical deletion requires a retention
 /// decision, and a blanket impl would let `()` stand in for one. Without one,

@@ -55,10 +55,11 @@ use crate::hnsw::{check_config, check_finite, check_vector};
 ///    encoding, such as one holding a float or a map keyed by something
 ///    other than strings or integers
 ///    ([`HeuremaError::UnencodableOperation`]);
-/// 9. a provenance or retention value the operation stores that does not
-///    read back as itself from its `serde_json` encoding: each Insert and
-///    Rebuild member's provenance, in ascending identity order, and a
-///    Destroy's retention ([`HeuremaError::UnencodableOperation`]).
+/// 9. a provenance or retention value the operation stores that nests more
+///    than 64 levels deep in JSON, or that does not read back as itself from
+///    its `serde_json` encoding: each Insert and Rebuild member's
+///    provenance, in ascending identity order, and a Destroy's retention
+///    ([`HeuremaError::UnencodableOperation`]).
 ///
 /// Each step covers the whole batch before the next begins, and per-member
 /// checks visit members in ascending identity order, so the refusal an
@@ -470,6 +471,14 @@ where
 fn json_round_trip<T: Serialize + DeserializeOwned + Eq>(value: &T) -> Result<(), String> {
     let bytes = serde_json::to_vec(value)
         .map_err(|error| format!("cannot be written as a JSON value: {error}"))?;
+    let depth = json_depth(&bytes);
+    if depth > MAX_CONSUMER_JSON_DEPTH {
+        return Err(format!(
+            "nests {depth} levels deep in JSON; a consumer value may nest at most \
+             {MAX_CONSUMER_JSON_DEPTH}, because stored records wrap it further and serde_json \
+             refuses to read past 128 levels"
+        ));
+    }
     // WHY `reported`: the value can be arbitrarily long, and a refusal must
     // not be.
     let json = identity::reported(&String::from_utf8_lossy(&bytes));
@@ -482,6 +491,48 @@ fn json_round_trip<T: Serialize + DeserializeOwned + Eq>(value: &T) -> Result<()
             "cannot be read back from its JSON value {json}: {error}"
         )),
     }
+}
+
+/// The deepest JSON nesting a consumer value may have.
+///
+/// WHY: a stored record wraps a provenance or retention value a few levels
+/// deeper than the value itself (a version payload's member table, an
+/// operation record's change list, a destroyed head), and serde_json refuses
+/// to read input nested past 128 levels. A value that round-trips on its own
+/// could still publish a record that never decodes again. 64 leaves more
+/// than enough room for every stored wrapping, and far more nesting than a
+/// provenance or retention reference needs.
+const MAX_CONSUMER_JSON_DEPTH: usize = 64;
+
+/// The deepest nesting of arrays and objects in JSON text `bytes`.
+///
+/// INVARIANT: `bytes` is what `serde_json` just wrote, so it is valid JSON:
+/// brackets inside strings are skipped, and a backslash escapes exactly the
+/// next byte.
+fn json_depth(bytes: &[u8]) -> usize {
+    let (mut depth, mut deepest) = (0_usize, 0_usize);
+    let (mut in_string, mut escaped) = (false, false);
+    for &byte in bytes {
+        if in_string {
+            match (escaped, byte) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                (false, _) => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth = depth.saturating_add(1);
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// Step 4: every vector component is finite.
@@ -553,5 +604,26 @@ fn check_content(config: &IndexConfig, content: &MemberContent) -> Result<(), He
             actual: content.family(),
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_depth;
+
+    #[test]
+    fn json_depth_counts_arrays_and_objects_but_not_brackets_in_strings() {
+        let cases: [(&[u8], usize); 7] = [
+            (b"7", 0),
+            (br#""[[{""#, 0),
+            (b"[]", 1),
+            (br#"{"a":[1,{"b":[]}]}"#, 4),
+            (br#"["]]]",["\"[",[]]]"#, 3),
+            (br#"[["\\"],[]]"#, 2),
+            (br#"[{"k\"[":"v"}]"#, 2),
+        ];
+        for (json, depth) in cases {
+            assert_eq!(json_depth(json), depth, "{}", String::from_utf8_lossy(json));
+        }
     }
 }

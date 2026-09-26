@@ -106,9 +106,10 @@
 //! build of the successor version, stage, publish. The checks write
 //! nothing, so an operation refused before it stages leaves storage as it
 //! was, and a stateless refusal makes no backend call at all. A publish
-//! refused after its stage leaves the staged version behind as orphan
-//! staged state; only a writer that bypasses the shared writer, or damage,
-//! causes one.
+//! refused after its stage (which only a writer that bypasses the shared
+//! writer, or damage, causes) leaves the staged version behind as orphan
+//! staged state, as does a `Staged` dropped, or a panic, between stage and
+//! publish.
 //!
 //! Every lifecycle over one backend shares the backend's [`WriterLock`]
 //! ([`LifecycleBackend::writer`]), held from before the head read until the

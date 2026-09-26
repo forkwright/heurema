@@ -28,9 +28,14 @@ use crate::error::WriterHeldSnafu;
 ///
 /// A panic while a guard is held releases the writer during unwinding. The
 /// writer protects no in-memory state, and every backend write is atomic,
-/// so nothing is left half done. Leaking a guard (`mem::forget` of a
-/// [`Prepared`](crate::Prepared) or [`Staged`](crate::Staged)) keeps the
-/// writer held for good.
+/// so no single write is left torn. A panic between
+/// [`Prepared::stage`](crate::Prepared::stage) and
+/// [`Staged::publish`](crate::Staged::publish) drops the
+/// [`Staged`](crate::Staged), which leaves the version it staged as orphan
+/// staged state, exactly as dropping it does; later mutations of that index
+/// are then refused with [`HeuremaError::StagedStateExists`] until recovery.
+/// Leaking a guard (`mem::forget` of a [`Prepared`](crate::Prepared) or
+/// [`Staged`](crate::Staged)) keeps the writer held for good.
 ///
 /// # Fairness
 ///

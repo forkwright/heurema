@@ -119,6 +119,8 @@ conformance!(
     a_same_key_publish_after_the_replay_lookup_is_refused_with_nothing_written,
     lifecycles_that_bypass_the_shared_writer_still_never_both_publish,
     a_head_naming_a_missing_payload_is_corrupt_not_absent,
+    a_head_naming_an_undecodable_payload_is_corrupt_not_absent,
+    values_at_the_json_depth_limit_publish_and_read_back_across_reopen,
     a_destroy_between_the_head_read_and_the_payload_read_is_head_changed_or_not_found,
     a_head_contradicting_its_payload_config_is_corrupt_before_any_refusal,
     lifecycle_and_snapshot_keyspaces_are_independent,
@@ -437,13 +439,15 @@ enum Hook {
 /// heurēma's shared writer, so a lifecycle over `inner` can write in the
 /// middle of an operation run through this one. An armed hook runs once, at
 /// its [`Hook`] point; an "after" hook runs once the inner read's result is
-/// computed. `hide_versions` makes every payload read as absent, and
+/// computed. `hide_versions` makes every payload read as absent,
+/// `corrupt_versions` makes every stored payload read as truncated bytes, and
 /// `rewrite_head` edits every head read, the way damage would.
 struct Bypassing<'h, B> {
     inner: B,
     writer: WriterLock,
     hook: RefCell<Option<Armed<'h>>>,
     hide_versions: bool,
+    corrupt_versions: bool,
     rewrite_head: Option<fn(Vec<u8>) -> Vec<u8>>,
 }
 
@@ -457,6 +461,7 @@ impl<'h, B> Bypassing<'h, B> {
             writer: WriterLock::new(),
             hook: RefCell::new(None),
             hide_versions: false,
+            corrupt_versions: false,
             rewrite_head: None,
         }
     }
@@ -495,7 +500,13 @@ impl<B: LifecycleBackend> LifecycleBackend for Bypassing<'_, B> {
     ) -> Result<Option<Vec<u8>>, HeuremaError> {
         self.fire(Hook::BeforeReadVersion);
         let payload = self.inner.read_version(index, version)?;
-        Ok(payload.filter(|_| !self.hide_versions))
+        Ok(payload.filter(|_| !self.hide_versions).map(|bytes| {
+            if self.corrupt_versions {
+                b"{\"format_version\":1".to_vec()
+            } else {
+                bytes
+            }
+        }))
     }
 
     fn read_operation(
@@ -2323,6 +2334,94 @@ fn a_head_naming_a_missing_payload_is_corrupt_not_absent<S: Store>(store: &S) ->
 
     assert_corrupt(damaged.index(&notes));
     assert_corrupt(damaged.apply(insert(&notes, "k", vec![vector(3, 30, &[1.0, 1.0])])?));
+    Ok(())
+}
+
+fn a_head_naming_an_undecodable_payload_is_corrupt_not_absent<S: Store>(store: &S) -> TestResult {
+    let backend = store.open()?;
+    let notes = index("notes")?;
+    seeded(&Lifecycle::open(&backend)?, &notes)?;
+    let damaged = Lifecycle::open(Bypassing {
+        corrupt_versions: true,
+        ..Bypassing::new(&backend)
+    })?;
+
+    // NOTE: undecodable bytes under the active head are damage; neither a
+    // read nor a mutation may report the index absent or the head moved.
+    assert_corrupt(damaged.index(&notes));
+    assert_corrupt(damaged.apply(insert(&notes, "k", vec![vector(3, 30, &[1.0, 1.0])])?));
+    Ok(())
+}
+
+/// test-local placeholder; heurēma defines no provenance or retention
+/// shape. Serializes as JSON arrays nested as deep as it is built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Nested(Vec<Nested>);
+
+impl ProvenanceReference for Nested {}
+
+impl RetentionReference for Nested {}
+
+/// A value whose JSON nests exactly `depth` arrays deep (`depth >= 1`).
+fn nested(depth: usize) -> Nested {
+    (1..depth).fold(Nested(Vec::new()), |inner, _| Nested(vec![inner]))
+}
+
+fn values_at_the_json_depth_limit_publish_and_read_back_across_reopen<S: Store>(
+    store: &S,
+) -> TestResult {
+    // NOTE: 64 is the documented limit on a consumer value's own JSON
+    // nesting; the stored records wrap it further, and every one of them must
+    // still decode after a reopen.
+    let deepest = nested(64);
+    let notes = index("notes")?;
+    let backend = store.open()?;
+    {
+        let lifecycle = IndexLifecycle::<_, TestMember, Nested, Nested>::open(&backend)?;
+        lifecycle.apply(LifecycleOperation::new(
+            notes.clone(),
+            OperationKey::try_from("create")?,
+            IndexChange::Create {
+                config: IndexConfig::Vector(HnswConfig::new(2)),
+            },
+        ))?;
+        lifecycle.apply(LifecycleOperation::new(
+            notes.clone(),
+            OperationKey::try_from("insert")?,
+            IndexChange::Insert {
+                members: vec![IndexMember::new(
+                    TestMember(1),
+                    deepest.clone(),
+                    MemberContent::Vector(vec![1.0, 0.0]),
+                )],
+            },
+        ))?;
+    }
+    let backend = store.reopen(backend)?;
+    let lifecycle = IndexLifecycle::<_, TestMember, Nested, Nested>::open(&backend)?;
+    let hits = lifecycle.index(&notes)?.query_vector(&[1.0, 0.0], 1)?;
+    assert_eq!(
+        hits.first().map(|hit| &hit.provenance),
+        Some(&deepest),
+        "provenance at the limit reads back"
+    );
+
+    lifecycle.apply(LifecycleOperation::new(
+        notes.clone(),
+        OperationKey::try_from("destroy")?,
+        IndexChange::Destroy {
+            retention: deepest.clone(),
+        },
+    ))?;
+    drop(lifecycle);
+    let backend = store.reopen(backend)?;
+    let lifecycle = IndexLifecycle::<_, TestMember, Nested, Nested>::open(&backend)?;
+    match lifecycle.record(&notes)?.map(|record| record.state) {
+        Some(IndexState::Destroyed { retention, .. }) => {
+            assert_eq!(retention, deepest, "retention at the limit reads back");
+        }
+        other => panic!("expected a destroyed record, got {other:?}"),
+    }
     Ok(())
 }
 

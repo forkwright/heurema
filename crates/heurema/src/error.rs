@@ -295,8 +295,9 @@ pub enum HeuremaError {
         location: snafu::Location,
     },
 
-    // NOTE: lifecycle storage refusals, raised by a `LifecycleBackend` write or
-    // by the replay check that reads the operation records it keeps.
+    // NOTE: lifecycle storage refusals, raised by a `LifecycleBackend` write,
+    // by the replay check that reads the operation records it keeps, or (for
+    // `WriterHeld`) by the backend's shared `WriterLock`.
     /// WHY: a version staged but never published is the only record of an
     /// interrupted operation. Staging over it would destroy that record, and
     /// destroying the index beside it would leave a marker no head can

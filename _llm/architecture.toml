@@ -202,7 +202,7 @@ purpose = "The lifecycle driver over any LifecycleBackend. apply(operation) runs
 
 [[interfaces]]
 crate = "heurema"
-kind = "struct"
+kind = "type"
 name = "WriterLock"
 purpose = "The lifecycle writer every lifecycle over one backend shares, returned by LifecycleBackend::writer. acquire() waits while another thread holds it and refuses a thread that already holds it with WriterHeld; the !Send WriterGuard releases it on drop, unwinding included. Guards no data; not FIFO; a leaked guard keeps it held."
 

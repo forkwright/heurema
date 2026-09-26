@@ -1077,3 +1077,61 @@ fn refusals_are_categorised_as_refused() -> Result<(), HeuremaError> {
     );
     Ok(())
 }
+
+/// test-local placeholder; heurēma defines no provenance or retention
+/// shape. Serializes as JSON arrays nested as deep as it is built.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Nested(Vec<Nested>);
+
+impl ProvenanceReference for Nested {}
+
+impl RetentionReference for Nested {}
+
+/// A value whose JSON nests exactly `depth` arrays deep (`depth >= 1`).
+fn nested(depth: usize) -> Nested {
+    (1..depth).fold(Nested(Vec::new()), |inner, _| Nested(vec![inner]))
+}
+
+fn nested_insert(depth: usize) -> IndexChange<TestMember, Nested, PlaceholderRetention> {
+    IndexChange::Insert {
+        members: vec![IndexMember::new(
+            TestMember(1),
+            nested(depth),
+            MemberContent::Vector(vec![0.0, 1.0]),
+        )],
+    }
+}
+
+fn nested_destroy(depth: usize) -> IndexChange<TestMember, PlaceholderProvenance, Nested> {
+    IndexChange::Destroy {
+        retention: nested(depth),
+    }
+}
+
+fn check_any<P: ProvenanceReference, R: RetentionReference>(
+    change: IndexChange<TestMember, P, R>,
+) -> Result<CheckedOperation<TestMember, P, R>, HeuremaError> {
+    CheckedOperation::check(LifecycleOperation::new(
+        index()?,
+        OperationKey::try_from("op-1")?,
+        change,
+    ))
+}
+
+#[test]
+fn consumer_values_nested_past_the_json_depth_limit_are_refused() -> Result<(), HeuremaError> {
+    check_any(nested_insert(64))?;
+    check_any(nested_destroy(64))?;
+
+    for error in [
+        refused(check_any(nested_insert(65))),
+        refused(check_any(nested_destroy(65))),
+    ] {
+        let HeuremaError::UnencodableOperation { reason, .. } = &error else {
+            panic!("unexpected {error:?}");
+        };
+        assert!(reason.contains("nests 65 levels deep"), "{error}");
+        assert_eq!(error.category(), ErrorCategory::Refused, "{error}");
+    }
+    Ok(())
+}
