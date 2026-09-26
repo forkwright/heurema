@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/forkwright/heurema/compare/v0.2.0...v0.3.0) (2026-09-26)
+
+
+### Features
+
+* **heurema:** add phase 02 index record and operation identity types ([#55](https://github.com/forkwright/heurema/issues/55)) ([bf833e4](https://github.com/forkwright/heurema/commit/bf833e41168e13580b33d4ab84879b753c54f70f)), closes [#30](https://github.com/forkwright/heurema/issues/30)
+* **heurema:** implement navigable HNSW graph ([#50](https://github.com/forkwright/heurema/issues/50)) ([21e5470](https://github.com/forkwright/heurema/commit/21e5470f9bbf67874805c2bebe9364c964916bde))
+* **heurema:** implement simple BM25 retrieval ([#48](https://github.com/forkwright/heurema/issues/48)) ([538969b](https://github.com/forkwright/heurema/commit/538969b517703878dc2a5bba2cb606c1276f9efd))
+* **heurema:** validate phase 02 lifecycle operations before any write ([#57](https://github.com/forkwright/heurema/issues/57)) ([da6c324](https://github.com/forkwright/heurema/commit/da6c324069f6b11a06cede51e90f4931ea52eeee)), closes [#30](https://github.com/forkwright/heurema/issues/30)
+* **persistence:** version individual index snapshots ([#51](https://github.com/forkwright/heurema/issues/51)) ([af7eeae](https://github.com/forkwright/heurema/commit/af7eeae7f2e750ad80408ea0d8487225bc66411f))
+* **workspace:** stage and atomically publish phase 02 index versions ([#59](https://github.com/forkwright/heurema/issues/59)) ([85032ca](https://github.com/forkwright/heurema/commit/85032ca243c999422cc948065ba81950e044ee4e)), closes [#30](https://github.com/forkwright/heurema/issues/30)
+
 ## [0.2.0](https://github.com/forkwright/heurema/compare/v0.1.3...v0.2.0) (2026-08-16)
 
 
